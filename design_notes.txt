@@ -1,0 +1,21 @@
+The serial comm between the linux pc and the mcu will use this format:
+
+<{command:parameter}>
+
+When the mcu sends a message to the linux machine it will:
+1. get the data from a variable
+2. wrap it up in a json
+3. wrap it in starting and ending markers < >
+4. and send it
+
+when the linux machine sends a message to the mcu it will do the same steps.
+1. get the data from a variable
+2. wrap it in a json
+3. wrap it in the sending chars 
+4. send it
+
+When either receives a message it will:
+1. watch the serial comm for a start and end character.
+2. once recieved it will process the message recieved, removing the tags
+3. it will unwrap the json doc 
+4. the data or commands will be available for assignment

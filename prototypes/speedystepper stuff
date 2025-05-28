@@ -1,0 +1,151 @@
+
+#include <SPI.h>
+#include <HighPowerStepperDriver.h>
+#include <Speedystepper.h>
+
+
+const uint8_t Step1Pin = D6;
+const uint8_t Step2Pin = D12;
+
+const uint8_t CSPin = D7;
+const uint8_t DirPin = D7;
+
+HighPowerStepperDriver sd;
+SpeedyStepper stepper1;
+SpeedyStepper stepper2;
+
+void setup()
+{
+
+
+  SPI.begin();
+  sd.setChipSelectPin(CSPin);
+
+  // Give the driver some time to power up.
+  delay(1);
+
+  // Reset the driver to its default settings and clear latched status
+  // conditions.
+  sd.resetSettings();
+  sd.clearStatus();
+
+  // Select auto mixed decay.  TI's DRV8711 documentation recommends this mode
+  // for most applications, and we find that it usually works well.
+  sd.setDecayMode(HPSDDecayMode::AutoMixed);
+
+  // Set the current limit. You should change the number here to an appropriate
+  // value for your particular system.
+  sd.setCurrentMilliamps36v4(1000);
+
+  // Set the number of microsteps that correspond to one full step.
+  sd.setStepMode(HPSDStepMode::MicroStep4);
+
+  // Enable the motor outputs.
+  sd.enableDriver();
+
+
+
+
+  // change the pin to use it for motion
+  // Drive the STEP and DIR pins low initially.
+  pinMode(Step1Pin, OUTPUT);
+  digitalWrite(Step1Pin, LOW);
+  pinMode(Step2Pin, OUTPUT);
+  digitalWrite(Step2Pin, LOW);
+  pinMode(DirPin, OUTPUT);
+  digitalWrite(DirPin, LOW);
+
+  stepper1.connectToPins(Step1Pin, DirPin);
+  stepper2.connectToPins(Step2Pin, DirPin);
+
+}
+
+void loop() 
+{
+  //
+  // Here will will try rotating at faster and faster speeds.  You can
+  // see how the motor's torque is reduced as the speed increases by
+  // pinching the shaft with your fingers.  Note: When the motor can't
+  // go at the commanded speed, it simply stops.
+  //
+  // I have conducted all of these tests with 1x microstepping.
+  //
+
+  //
+  // 100 steps/second
+  //
+  Serial.println("Testing 100 steps/second.");
+  stepper1.setSpeedInStepsPerSecond(100);
+  stepper1.setAccelerationInStepsPerSecondPerSecond(100);
+  stepper1.moveRelativeInSteps(200);
+  delay(800);
+
+  //
+  // 200 steps/second
+  //
+  Serial.println("Testing 200 steps/second.");
+  stepper1.setSpeedInStepsPerSecond(200);
+  stepper1.setAccelerationInStepsPerSecondPerSecond(200);
+  stepper1.moveRelativeInSteps(400);
+  delay(800);
+
+  //
+  // 400 steps/second
+  //
+  Serial.println("Testing 400 steps/second.");
+  stepper1.setSpeedInStepsPerSecond(400);
+  stepper1.setAccelerationInStepsPerSecondPerSecond(400);
+  stepper1.moveRelativeInSteps(800);
+  delay(800);
+
+  //
+  // 800 steps/second
+  // Note: My 12V NEAMA 17 motor with a 20V power supply stops here
+  //
+  Serial.println("Testing 800 steps/second.");
+  stepper1.setSpeedInStepsPerSecond(800);
+  stepper1.setAccelerationInStepsPerSecondPerSecond(800);
+  stepper1.moveRelativeInSteps(1600);
+  delay(800);
+
+  //
+  // 1600 steps/second
+  //
+  Serial.println("Testing 1600 steps/second.");
+  stepper1.setSpeedInStepsPerSecond(1600);
+  stepper1.setAccelerationInStepsPerSecondPerSecond(1600); 
+  stepper1.moveRelativeInSteps(3200);
+  delay(800);
+
+  //
+  // 3200 steps/second
+  //
+  Serial.println("Testing 3200 steps/second.");
+  stepper1.setSpeedInStepsPerSecond(3200);
+  stepper1.setAccelerationInStepsPerSecondPerSecond(3200); 
+  stepper1.moveRelativeInSteps(6400);
+  delay(800);
+
+  //
+  // 6400 steps/second
+  // Note: My 3.2V NEAMA 17 motor with a 20V power supply stops here
+  //
+  Serial.println("Testing 6400 steps/second.");
+  stepper1.setSpeedInStepsPerSecond(6400);
+  stepper1.setAccelerationInStepsPerSecondPerSecond(6400); 
+  stepper1.moveRelativeInSteps(12800);
+  delay(800);
+
+  //
+  // 12500 steps/second, the fastest this library can generate
+  // Note: My 3.8V NEAMA 11 motor with a 20V power supply stops here
+  //
+  Serial.println("Testing 12500 steps/second.");
+  stepper1.setSpeedInStepsPerSecond(12500);
+  stepper1.setAccelerationInStepsPerSecondPerSecond(6400);
+  stepper1.moveRelativeInSteps(38400);
+  delay(800);
+
+  Serial.println("");  
+  delay(3000);
+}

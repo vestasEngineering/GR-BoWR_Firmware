@@ -1,0 +1,3 @@
+The design of this firmware is organized into 1 main loop that runs several state machines.
+
+Each of the state machines obviously maintains its own state and is controlled by 
