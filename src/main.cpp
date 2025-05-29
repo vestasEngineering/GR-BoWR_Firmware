@@ -36,6 +36,9 @@ ActuatorControl actuator;
 #include <MySerial.hpp>
 MySerial mySerial(actuator);
 
+#include <BatteryMonitor.hpp>
+BatteryMonitor batteryMonitor;
+
 #include "Portenta_H7_TimerInterrupt.h"
 volatile int interruptCounter = 0;
 void m7timer() { 
@@ -96,6 +99,7 @@ void setup() {
   ultrasonic.setup();
   encoder.setup();
   actuator.setup ();
+  batteryMonitor.setup();
 }
 
 void loop() {
@@ -105,6 +109,7 @@ void loop() {
   ultrasonic.stateMachine();
   actuator.stateMachine();
   encoder.stateMachine();
+  batteryMonitor.stateMachine();
   //Serial.print("Current Encoder Position BEFORE JSON: ");
   //Serial.println(encoder.getPosition());  
   //encoder.debugRawInputs();
