@@ -7,7 +7,7 @@
 #define pinA A5
 #define pinB A6
 #define PULSES_PER_CM 37.6 //Calculated from encoder wheel circumference and encoder resolution.
-#define ENCODER_UPDATE_DELAY 1500 //Delay in milliseconds.
+#define ENCODER_UPDATE_DELAY 1250 //Delay in milliseconds.
 
 class ExtEncoder {
     public: 

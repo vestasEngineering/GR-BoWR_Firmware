@@ -85,7 +85,7 @@ class BatteryMonitor {
                     break;
                 case DISPLAYING:
                     displayVoltage();
-                    delay(2000); // Update display every 2 seconds
+                    //delay(200); // Update display every 2 seconds
                     state = READING; 
                     break;
                 
