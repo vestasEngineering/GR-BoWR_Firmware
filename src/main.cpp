@@ -39,8 +39,8 @@ MySerial mySerial(actuator);
 #include <BatteryMonitor.hpp>
 BatteryMonitor batteryMonitor;
 
-#include <AndonLight.hpp>
-AndonLight andonLight;
+//#include <AndonLight.hpp>
+//AndonLight andonLight;
 
 #include "Portenta_H7_TimerInterrupt.h"
 volatile int interruptCounter = 0;
@@ -103,7 +103,7 @@ void setup() {
   encoder.setup();
   actuator.setup ();
   batteryMonitor.setup();
-  andonLight.setup();
+  //andonLight.setup();
 }
 
 void loop() {
@@ -114,7 +114,7 @@ void loop() {
   actuator.stateMachine();
   encoder.stateMachine();
   batteryMonitor.stateMachine();
-  andonLight.stateMachine();
+  //andonLight.stateMachine();
   //Serial.print("Current Encoder Position BEFORE JSON: ");
   //Serial.println(encoder.getPosition());  
   //encoder.debugRawInputs();

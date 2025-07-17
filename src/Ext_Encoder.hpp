@@ -79,7 +79,7 @@ class ExtEncoder {
             noInterrupts();
             long pos = position;
             interrupts();
-            return pos / PULSES_PER_CM; //Convert pulses to cm. 
+            return pos / PULSES_PER_CM * -1; //Convert pulses to cm.
         }
 
         void writeDistanceJson() {

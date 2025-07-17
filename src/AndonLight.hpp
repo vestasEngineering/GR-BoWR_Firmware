@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
 
-#define LED_PIN 1
+#define LED_PIN 5
 #define NUM_LEDS 60
 #define BLINK_INTERVAL 500 // Blink interval in milliseconds
 
@@ -29,7 +29,6 @@ class AndonLight {
         unsigned long lastBlinkTime = 0;
 
         void setup() {
-            pinMode(LED_PIN, OUTPUT);
             strip.begin();
             strip.show(); // Initialize all pixels to 'off'
             setState(GREEN);
@@ -37,20 +36,18 @@ class AndonLight {
 
         void setState(States newState) {
             state = newState;
-            blinkStatus = false; // Reset blink status when changing state
+            blinkStatus = (state == BLINK_GREEN || state == BLINK_YELLOW || state == BLINK_BLUE || state == BLINK_RED);
+            updateLEDs();
+        }
 
-            if (state == GREEN) {
-                setColor(strip.Color(0, 255, 0)); // Green
-            } else if (state == YELLOW) {
-                setColor(strip.Color(255, 255, 0)); // Yellow
-            } else if (state == BLUE) {
-                setColor(strip.Color(0, 0, 255)); // Blue
-            } else if (state == RED) {
-                setColor(strip.Color(255, 0, 0)); // Red
-            } else if (state == OFF) {
-                setColor(strip.Color(0, 0, 0)); // Off
-            } else if (state == BLINK_GREEN || state == BLINK_YELLOW || state == BLINK_BLUE || state == BLINK_RED) {
-                blinkStatus = true; // Enable blinking for these states
+        void updateLEDs() {
+            switch (state) {
+                case GREEN: setColor(strip.Color(0, 255, 0)); break;
+                case YELLOW: setColor(strip.Color(255, 255, 0)); break;
+                case BLUE: setColor(strip.Color(0, 0, 255)); break;
+                case RED: setColor(strip.Color(255, 0, 0)); break;
+                case OFF: setColor(strip.Color(0, 0, 0)); break;
+                default: break;
             }
         }
 
@@ -64,57 +61,21 @@ class AndonLight {
         void stateMachine() {
             unsigned long currentTime = millis();
 
+            if (blinkStatus && currentTime - lastBlinkTime >= BLINK_INTERVAL) {
+                lastBlinkTime = currentTime;
+                blinkStatus = !blinkStatus;
+            }
+            
+            uint32_t blinkColor;
             switch (state) {
-                case OFF:
-                    // All lights off
-                    setState(OFF);
-                    break;
-                case RED:
-                    // Red light on
-                    setState(RED);
-                    break;
-                case YELLOW:
-                    // Yellow light on
-                    setState(YELLOW);
-                    break;
-                case GREEN:
-                    // Green light on
-                    setState(GREEN);
-                    break;
-                case BLUE:
-                    // Blue light on
-                    setState(BLUE);
-                    break;
-                case BLINK_RED:
-                    if (currentTime - lastBlinkTime >= 500) {
-                        blinkStatus = !blinkStatus; // Toggle blink status
-                        lastBlinkTime = currentTime;
-                        setColor(blinkStatus ? strip.Color(255, 0, 0) : strip.Color(0, 0, 0)); // Red blink
-                    }
-                    break;
-                case BLINK_YELLOW:
-                    if (currentTime - lastBlinkTime >= 500) {
-                        blinkStatus = !blinkStatus; // Toggle blink status
-                        lastBlinkTime = currentTime;
-                        setColor(blinkStatus ? strip.Color(255, 255, 0) : strip.Color(0, 0, 0)); // Yellow blink
-                    }
-                    break;
-                case BLINK_GREEN:
-                    if (currentTime - lastBlinkTime >= 500) {
-                        blinkStatus = !blinkStatus; // Toggle blink status
-                        lastBlinkTime = currentTime;
-                        setColor(blinkStatus ? strip.Color(0, 255, 0) : strip.Color(0, 0, 0)); // Green blink
-                    }
-                    break;
-                case BLINK_BLUE:
-                    if (currentTime - lastBlinkTime >= 500) {
-                        blinkStatus = !blinkStatus; // Toggle blink status
-                        lastBlinkTime = currentTime;
-                        setColor(blinkStatus ? strip.Color(0, 0, 255) : strip.Color(0, 0, 0)); // Blue blink
-                    }
-                    break;
+                case BLINK_RED: blinkColor = strip.Color(255, 0, 0); break;
+                case BLINK_YELLOW: blinkColor = strip.Color(255, 255, 0); break;
+                case BLINK_GREEN: blinkColor = strip.Color(0, 255, 0); break;
+                case BLINK_BLUE: blinkColor = strip.Color(0, 0, 255); break;
 
             }
+
+            setColor(blinkStatus ? blinkColor : strip.Color(0,0,0));
         }
 };
 
