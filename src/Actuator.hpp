@@ -27,21 +27,21 @@ class ActuatorControl {
 
         void setup() {
             Wire.begin(); // Initialize I2C on specified pins
-            Serial.println("Initializing ActuatorControl...");
+            Serial.println("{\"status\": \"Initializing ActuatorControl...\"}");
 
             if (!dac.begin()) {
-                Serial.println("Failed to initialize MCP4728");
+                Serial.println("{\"status\": \"Failed to initialize MCP4728.\"}");
                 while(1); // Stop if DAC initialization fails.
             } else {
-                Serial.println("MCP4728 initialized successfully.");
+                Serial.println("{\"status\": \"MCP4728 initialized successfully.\"}");
             }
             
             // Initialize ADC
             if (!adc.begin()) {
-                Serial.println("** Error: Failed to initialize ADS1115. Halting. **");
+                Serial.println("{\"status\": \"** Error: Failed to initialize ADS1115. Halting. **\"}");
                 while (1);
             } else {
-                Serial.println("ADS1115 initialized successfully");
+                Serial.println("{\"status\": \"ADS1115 initialized successfully.\"}");
             }
             state = SET_POSITION;
         }
