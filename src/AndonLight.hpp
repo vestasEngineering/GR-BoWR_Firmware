@@ -134,6 +134,7 @@ public:
             booting = false;
             strip.clear();
             strip.show();
+            updateLEDs(true); // Apply current state with fade
             return;
         }
 

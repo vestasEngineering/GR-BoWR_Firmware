@@ -14,18 +14,12 @@
 #include <mbed.h>
 #include <math.h>
 
-
-//#include <BlueLed.hpp>
-//BlueLed blueLed;
-
 #include <Motors.hpp>
 Motors motors;
 
 #include <Ultrasonic.hpp>
 Ultrasonic ultrasonic;
-
-//#include <Encoder.hpp>
-//Encoder encoder(3, 0x6064);
+bool ultrasonicEnabled = false;
 
 #include <Ext_Encoder.hpp>
 ExtEncoder encoder;
@@ -76,7 +70,6 @@ void m7timer() {
 
   // every 10,000/10,000 second - 1hz
   if ((interruptCounter % 10000) == 0) {
-    //if (blueLed.delay) blueLed.delay--;
     interruptCounter = 0;
   }
 
@@ -101,6 +94,7 @@ void setup() {
   mySerial.setup();
   motors.setup();
   ultrasonic.setup();
+  ultrasonic.attachMotors(motors);
   encoder.setup();
   actuator.setup ();
   //batteryMonitor.setup();
@@ -108,14 +102,14 @@ void setup() {
 
 void loop() {
   andonLight.loop();
-  //blueLed.stateMachine();
   mySerial.stateMachine();
   motors.stateMachine();
-  ultrasonic.stateMachine();
+  
+  if (ultrasonicEnabled) {
+    ultrasonic.stateMachine();  // PID loop only runs when enabled
+  }
+  
   actuator.stateMachine();
   encoder.stateMachine();
   //batteryMonitor.stateMachine();
-  //Serial.print("Current Encoder Position BEFORE JSON: ");
-  //Serial.println(encoder.getPosition());  
-  //encoder.debugRawInputs();
 }

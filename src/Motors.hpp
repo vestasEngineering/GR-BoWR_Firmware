@@ -1,5 +1,3 @@
-
-
 #ifndef MY_MOTOR_CLASS
 #define MY_MOTOR_CLASS
 

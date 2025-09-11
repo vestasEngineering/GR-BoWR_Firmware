@@ -296,8 +296,54 @@ public:
             response["status"] = "triggers_reset";
             serializeJson(response, Serial);
             Serial.println();
+        }
+
+        else if (action.equalsIgnoreCase("start_process")) {
+            ultrasonicEnabled = true;
+            ultrasonic.processSpeed = 0.0;
+            ultrasonic.currentSpeed = 0.0;
+            andonLight->setState(AndonLight::BLINK_GREEN);
+
+            StaticJsonDocument<64> response;
+            response["status"] = "process_started";
+            serializeJson(response, Serial);
+            Serial.println();
+        }
+
+        else if (action.equalsIgnoreCase("stop_process")) {
+            ultrasonicEnabled = false;
+            motors->STOP();
+            andonLight->setState(AndonLight::GREEN);
+
+            StaticJsonDocument<64> response;
+            response["status"] = "process_stopped";
+            serializeJson(response, Serial);
+            Serial.println();
+        }
+
+        else if (action.equalsIgnoreCase("set_speed")) {
+            float speed = jsonPacket["speed"];
+            ultrasonic.processSpeed = speed;
+            ultrasonic.currentSpeed = speed;
+
+            StaticJsonDocument<64> response;
+            response["status"] = "speed_set";
+            response["speed"] = speed;
+            serializeJson(response, Serial);
+            Serial.println();
             }
 
+        else if (action.equalsIgnoreCase("shutdown")) {
+            motors->STOP();
+            ultrasonicEnabled = false;
+            andonLight->setState(AndonLight::GREEN);
+            triggerBuffer.clear();
+            serialStarted = false;  // Optional: block further commands until reinitialized
+            StaticJsonDocument<64> response;
+            response["status"] = "shutdown_complete";
+            serializeJson(response, Serial);
+            Serial.println();
+            }
         }
     }
 
@@ -330,7 +376,7 @@ public:
             if (!trig.triggered && currentPos >= trig.threshold) {
                 Serial.println("[Trigger Debug] Trigger condition met! Activating...");
 
-                actuator->actuatorPositions[trig.activate_channel] = 5.0;
+                actuator->actuatorPositions[trig.activate_channel] = 3.0;
                 trig.triggerTime = now;
                 trig.waitingToDeactivate = true;
                 trig.triggered = true;
