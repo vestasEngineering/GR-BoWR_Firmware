@@ -376,7 +376,7 @@ public:
             if (!trig.triggered && currentPos >= trig.threshold) {
                 Serial.println("[Trigger Debug] Trigger condition met! Activating...");
 
-                actuator->actuatorPositions[trig.activate_channel] = 3.0;
+                actuator->actuatorPositions[trig.activate_channel] = 4.4;
                 trig.triggerTime = now;
                 trig.waitingToDeactivate = true;
                 trig.triggered = true;
@@ -404,10 +404,6 @@ public:
             }
         }
     }
-
-
-
-
 };
 
 #endif

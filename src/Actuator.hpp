@@ -7,7 +7,7 @@
 #include <Adafruit_MCP4728.h>
 #include <Adafruit_ADS1X15.h>
 
-#define NUM_ACTUATORS 3
+#define NUM_ACTUATORS 4
 #define MAX_VOLTAGE 5.0
 #define MAX_FEEDBACK 3.3
 

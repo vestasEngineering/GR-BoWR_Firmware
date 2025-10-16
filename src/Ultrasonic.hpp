@@ -37,7 +37,7 @@ public:
 
     void setup() {
         analogReadResolution(10);
-        pid.setOutputLimits(-0.005, 0.005);
+        pid.setOutputLimits(-0.01, 0.01);
         pid.setSampleTime(0.05);
     }
 

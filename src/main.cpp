@@ -36,6 +36,9 @@ MySerial mySerial(actuator, andonLight, motors, encoder);
 #include <BatteryMonitor.hpp>
 BatteryMonitor batteryMonitor;
 
+#include "JogControl.hpp"
+JogControl jogControl(motors, mySerial);
+
 #include "Portenta_H7_TimerInterrupt.h"
 volatile int interruptCounter = 0;
 void m7timer() { 
@@ -97,6 +100,7 @@ void setup() {
   ultrasonic.attachMotors(motors);
   encoder.setup();
   actuator.setup ();
+  jogControl.setup();
   //batteryMonitor.setup();
 }
 
@@ -111,5 +115,6 @@ void loop() {
   
   actuator.stateMachine();
   encoder.stateMachine();
+  jogControl.update();
   //batteryMonitor.stateMachine();
 }
