@@ -73,9 +73,9 @@ class ActuatorControl {
 
             // Write the value to the specified DAC channel in JSON
             if (!dac.setChannelValue(channelEnum, dacValue, MCP4728_VREF_VDD, MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL)) {
-                Serial.println("** Error: Failed to set DAC channel value!");
-                Serial.print(channel);
-                Serial.println(" value! **");
+                //Serial.println("** Error: Failed to set DAC channel value!");
+                //Serial.print(channel);
+                //Serial.println(" value! **");
             } else {
                 //Serial.print("DAC channel ");
                 //Serial.print(channel);

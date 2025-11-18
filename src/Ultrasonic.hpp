@@ -20,7 +20,7 @@ public:
     float currentSpeed = 0.0;
     float processSpeed = 0.0;
 
-    float setPoint = 130.0;
+    float setPoint = 124.0;
     float tolerance = 2.0;
     float lowerLimit = setPoint - tolerance;
     float upperLimit = setPoint + tolerance;
@@ -37,8 +37,8 @@ public:
 
     void setup() {
         analogReadResolution(10);
-        pid.setOutputLimits(-0.01, 0.01);
-        pid.setSampleTime(0.05);
+        pid.setOutputLimits(-0.05, 0.008);
+        pid.setSampleTime(0.01);
     }
 
     void updateHeight(float height) {
@@ -56,13 +56,18 @@ public:
             // Read and smooth distance
             voltage = (float(analogRead(ULTRASONIC_PIN)) * 3.1 / 1023.0);
             measuredDistance = voltage * mmPerVolt + offsetDistance;
+        
+            // Debug: Print measured distance to Serial Monitor
+            //Serial.print("Measured Distance: ");
+            //Serial.println(measuredDistance);
+
 
             if (!isValidMeasurement(measuredDistance)) {
-                delay = 50;
+                delay = 10;
                 return;
             }
 
-            distance[0] = distance[0] + (measuredDistance - distance[0]) * 0.8;
+            distance[0] = distance[0] + (measuredDistance - distance[0]) * 0.80;
 
             // PID control
             if (distance[0] < 70.0) {
@@ -86,7 +91,7 @@ public:
                 motors->speeds[3] =  processSpeed;
             }
 
-            delay = 50; // 50ms
+            delay = 10; // 10ms
         }
     }
 };

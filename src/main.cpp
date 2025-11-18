@@ -21,8 +21,11 @@ Motors motors;
 Ultrasonic ultrasonic;
 bool ultrasonicEnabled = false;
 
-#include <Ext_Encoder.hpp>
-ExtEncoder encoder;
+#include <UltrasonicServo.hpp>
+UltrasonicServo ultrasonicServo;
+
+//#include <Ext_Encoder.hpp>
+//ExtEncoder encoder;
 
 #include <Actuator.hpp>
 ActuatorControl actuator;
@@ -31,7 +34,7 @@ ActuatorControl actuator;
 AndonLight andonLight;
 
 #include <MySerial.hpp>
-MySerial mySerial(actuator, andonLight, motors, encoder);
+MySerial mySerial(actuator, andonLight, motors);
 
 #include <BatteryMonitor.hpp>
 BatteryMonitor batteryMonitor;
@@ -45,7 +48,7 @@ void m7timer() {
   // every 1/10,000 second - 10,000hz - 0.0001 second
   interruptCounter++;
 
-  if(encoder.thisDelay) encoder.thisDelay--;
+  //if(encoder.thisDelay) encoder.thisDelay--;
   //if(mySerial.delay) mySerial.delay--;
 
   if(mySerial.receiveDelay) mySerial.receiveDelay--;
@@ -63,7 +66,7 @@ void m7timer() {
   // every 100/10,000 second - 100hz - 0.01 second
   if ((interruptCounter % 100) == 0) { 
     if(ultrasonic.delay) ultrasonic.delay--;
-    if(encoder.thisDelay) encoder.thisDelay--;
+    //if(encoder.thisDelay) encoder.thisDelay--;
   }
 
   // every 1,000/10,000 second - 10hz - 0.1 second
@@ -96,9 +99,12 @@ void setup() {
   andonLight.setup();
   mySerial.setup();
   motors.setup();
+  //motors.RESET();
+  //motors.setAcceleration(0);
   ultrasonic.setup();
   ultrasonic.attachMotors(motors);
-  encoder.setup();
+  ultrasonicServo.setup();
+  //encoder.setup();
   actuator.setup ();
   jogControl.setup();
   //batteryMonitor.setup();
@@ -108,13 +114,45 @@ void loop() {
   andonLight.loop();
   mySerial.stateMachine();
   motors.stateMachine();
-  
-  if (ultrasonicEnabled) {
-    ultrasonic.stateMachine();  // PID loop only runs when enabled
+
+  // Poll CAN for incoming messages
+  while (CAN.available()) {
+    CanMsg msg = CAN.read();
+    motors.handleCANResponse(msg);
+     //Serial.print("Received CAN ID: ");
+    //Serial.println(msg.id, HEX);
+    //Serial.print("Data: ");
+    for (int i = 0; i < msg.data_length; i++) {
+      //Serial.print(msg.data[i], HEX);
+      //Serial.print(" ");
+    }
+    //Serial.println();
   }
-  
+
+
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 500) { // every 0.5s
+      lastPrint = millis();
+      //Serial.println("Encoder Positions (rev):");
+      for (int i = 0; i < 4; i++) {
+          //Serial.print("Axis ");
+          //Serial.print(i + 1);
+          //Serial.print(": ");
+          //Serial.println(motors.positions[i], 4); // 4 decimal places
+      }
+      //Serial.println("----------------------");
+  }
+
+  if (ultrasonicEnabled) {
+      ultrasonicServo.activate();  // Servo active when ultrasonic is enabled
+      ultrasonic.stateMachine();
+  } else {
+      ultrasonicServo.deactivate(); // Servo inactive when ultrasonic is disabled
+  }
+
+
   actuator.stateMachine();
-  encoder.stateMachine();
+  //encoder.stateMachine();
   jogControl.update();
   //batteryMonitor.stateMachine();
 }

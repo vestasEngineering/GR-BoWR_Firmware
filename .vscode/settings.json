@@ -11,7 +11,8 @@
         "vector": "cpp",
         "string_view": "cpp",
         "initializer_list": "cpp",
-        "mstd_iterator": "cpp"
+        "mstd_iterator": "cpp",
+        "cmath": "cpp"
     },
     "cmake.configureOnOpen": false
 }

@@ -3,7 +3,7 @@
 
 #include <ArduinoJson.h>
 #include <Actuator.hpp>
-#include "Ext_Encoder.hpp"
+//#include "Ext_Encoder.hpp"
 #include "AndonLight.hpp"  
 #include "Motors.hpp"
 #include <vector>
@@ -35,12 +35,12 @@ public:
     std::vector<Trigger> triggerBuffer;
 
     ActuatorControl* actuator;
-    ExtEncoder* encoder;
+    //ExtEncoder* encoder;
     AndonLight* andonLight;
     Motors* motors;
 
-    MySerial(ActuatorControl& actuatorRef, AndonLight& lightRef, Motors& motorsRef, ExtEncoder& encoderRef)
-    : actuator(&actuatorRef), andonLight(&lightRef), motors(&motorsRef), encoder(&encoderRef) {}
+    MySerial(ActuatorControl& actuatorRef, AndonLight& lightRef, Motors& motorsRef)
+    : actuator(&actuatorRef), andonLight(&lightRef), motors(&motorsRef) {}
 
 
 
@@ -210,7 +210,7 @@ public:
             }
 
             else if (action.equalsIgnoreCase("reset_encoder")) {
-                encoder->position = 0;
+                //encoder->position = 0;
 
                 StaticJsonDocument<64> response;
                 response["status"] = "Encoder reset";
@@ -348,7 +348,7 @@ public:
     }
 
     void checkTriggers() {
-        int currentPos = encoder->getPosition();
+        int currentPos = motors->requestAPOS();
         unsigned long now = millis();
 
         /* [TRIGGER DEBUG]  

@@ -3,96 +3,142 @@
 
 #include <Arduino.h>
 #include <Wire.h>
-#include <hd44780.h>
-#include <hd44780ioClass/hd44780_I2Cexp.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 #define BATTERY_PIN A0
-#define LCD_ADDRESS 0x27
-#define LCD_COLUMNS 16 
-#define LCD_ROWS 2
-#define MAX_BATTERY_VOLTAGE 20.5 // Maximum battery voltage for a fully charged LiPo cell
-#define MIN_BATTERY_VOLTAGE 12.5 // Minimum battery voltage for a LiPo cell
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1 // Reset pin (not used with I2C)
+#define MAX_BATTERY_VOLTAGE 20.0
+#define MIN_BATTERY_VOLTAGE 16.5
 
-hd44780_I2Cexp lcd;
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 class BatteryMonitor {
-    public:
-        float voltage = 0.0;
-        const float R1 = 100000.0; // Resistor 1 value in ohms
-        const float R2 = 10000.0; // Resistor 2 value in ohms
-        const float VREF = 3.1; // Supply voltage in volts
-        const float ADC_MAX = 1023.0; // Maximum ADC value for 10-bit resolution
+public:
+    float voltage = 0.0;
+    const float R1 = 100000.0;
+    const float R2 = 10000.0;
+    const float VREF = 3.1;
+    const float ADC_MAX = 1023.0;
+    static const int NUM_SAMPLES = 10;
+    float voltageSamples[NUM_SAMPLES];
+    int sampleIndex = 0;
+    bool bufferFilled = false;
 
-        enum States {
-            READING,
-            DISPLAYING,
-        };
-        States state;
+    enum States {
+        READING,
+        DISPLAYING,
+    };
+    States state;
 
-        void setup(void) {
-            analogReadResolution(10);
-            
-            if (lcd.begin(16,2) == 0) {
-                lcd.clear();
-                lcd.print("Battery Monitor");
-                delay(2000);
-            } else {
-                Serial.println("LCD initialization failed");
-            }
+    void setup(void) {
+        analogReadResolution(10);
 
-            state = READING;
+        if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+            Serial.println(F("SSD1306 allocation failed"));
+            while (true); // Halt
         }
 
-        void readBatteryVoltage(void) {
-            int adcValue = analogRead(BATTERY_PIN);
-            float measuredVoltage = (adcValue * VREF / ADC_MAX);
-            voltage = measuredVoltage * (R1 + R2) / R2; // Voltage divider formula
+        display.clearDisplay();
+        display.setTextSize(3);
+        display.setTextColor(SSD1306_WHITE);
+        display.setCursor(0, 0);
+        display.println("GR-LRR");
+        display.display();
+        delay(2000);
+
+        state = READING;
+    }
+
+    void readBatteryVoltage(void) {
+        int adcValue = analogRead(BATTERY_PIN);
+        float measuredVoltage = (adcValue * VREF / ADC_MAX);
+        float actualVoltage = measuredVoltage * (R1 + R2) / R2;
+
+        voltageSamples[sampleIndex] = actualVoltage;
+        sampleIndex = (sampleIndex + 1) % NUM_SAMPLES;
+        if (sampleIndex == 0) bufferFilled = true;
+
+        int count = bufferFilled ? NUM_SAMPLES : sampleIndex;
+        float sum = 0.0;
+        for (int i = 0; i < count; i++) {
+            sum += voltageSamples[i];
         }
+        voltage = sum / count;
+    }
 
-        void displayVoltage(void) {
+    void drawVoltage(float voltage) {
+        display.setTextSize(2);
+        display.setCursor(0, 0);
+        display.print("V: ");
+        display.print(voltage, 1); // One decimal place
+    }
 
-            float batteryPercentage = (voltage - MIN_BATTERY_VOLTAGE) / (MAX_BATTERY_VOLTAGE - MIN_BATTERY_VOLTAGE) * 100.0;
+    void drawPercentage(float percentage) {
+        display.setTextSize(2);
+        display.setCursor(0, 20);
+        display.print("Chg: ");
+        display.print(int(percentage));
+        display.print("%");
+    }
 
-            batteryPercentage = constrain(batteryPercentage, 0.0, 100.0); // Ensure percentage is within 0-100%
+    void drawBatteryIcon(float percentage) {
+        int iconX = 100;
+        int iconY = 0;
+        int iconWidth = 20;
+        int iconHeight = 12;
 
-            int gaugeValue = (batteryPercentage / 100.0) * 14; // Map percentage to LCD columns
+        // Outline
+        display.drawRect(iconX, iconY, iconWidth, iconHeight, SSD1306_WHITE);
+        // Tip
+        display.fillRect(iconX + iconWidth, iconY + 4, 2, 4, SSD1306_WHITE);
 
-            String guage = "|";
-            for (int i = 0; i < gaugeValue; i++) {
-                guage += '=';
-            }
-            for (int i = gaugeValue; i < 14; i++) {
-                guage += ' ';
-            }
-            guage += "|";
+        // Fill level
+        int fillWidth = (percentage / 100.0) * (iconWidth - 2);
+        display.fillRect(iconX + 1, iconY + 1, fillWidth, iconHeight - 2, SSD1306_WHITE);
+    }
 
+    void drawGaugeBar(float percentage) {
+        int gaugeX = 14;
+        int gaugeY = 45;
+        int gaugeHeight = 10;
+        int gaugeMaxWidth = 100;
+        int gaugeFillWidth = (percentage / 100.0) * gaugeMaxWidth;
 
-            lcd.clear();
-            lcd.setCursor(0, 0);
-            lcd.print("Battery: ");
-            lcd.print(int(batteryPercentage));
-            lcd.print("%");
+        display.drawRect(gaugeX, gaugeY, gaugeMaxWidth, gaugeHeight, SSD1306_WHITE);
+        display.fillRect(gaugeX + 1, gaugeY + 1, gaugeFillWidth - 2, gaugeHeight - 2, SSD1306_WHITE);
+    }
 
-            lcd.setCursor(0, 1);
-            lcd.print(guage);
+    void displayVoltage(void) {
+        float batteryPercentage = (voltage - MIN_BATTERY_VOLTAGE) / (MAX_BATTERY_VOLTAGE - MIN_BATTERY_VOLTAGE) * 100.0;
+        batteryPercentage = constrain(batteryPercentage, 0.0, 100.0);
+
+        display.clearDisplay();
+
+        drawVoltage(voltage);
+        drawPercentage(batteryPercentage);
+        drawBatteryIcon(batteryPercentage);
+        drawGaugeBar(batteryPercentage);
+
+        display.display();
+    }
+
+    void stateMachine() {
+        switch (state) {
+            case READING:
+                readBatteryVoltage();
+                state = DISPLAYING;
+                break;
+            case DISPLAYING:
+                displayVoltage();
+                state = READING;
+                break;
+            default:
+                break;
         }
-
-        void stateMachine() {
-            switch (state) {
-                case READING:
-                    readBatteryVoltage();
-                    state = DISPLAYING;
-                    break;
-                case DISPLAYING:
-                    displayVoltage();
-                    //delay(200); // Update display every 2 seconds
-                    state = READING; 
-                    break;
-                
-                default:
-                    break;
-            }
-        }
+    }
 };
 
 #endif
