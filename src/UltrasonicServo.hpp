@@ -8,7 +8,7 @@ class UltrasonicServo {
 public:
     enum ServoState { INACTIVE, ACTIVE };
 
-    UltrasonicServo() : currentState(INACTIVE), activeAngle(0), inactiveAngle(180) {}
+    UltrasonicServo() : currentState(INACTIVE), activeAngle(10), inactiveAngle(180) {}
 
     void setup() {
         servo.attach(D4); // Always use PWN pin

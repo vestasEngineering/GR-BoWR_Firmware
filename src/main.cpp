@@ -30,11 +30,11 @@ UltrasonicServo ultrasonicServo;
 #include <Actuator.hpp>
 ActuatorControl actuator;
 
-#include <AndonLight.hpp>
-AndonLight andonLight;
+//#include <AndonLight.hpp>
+//AndonLight andonLight;
 
 #include <MySerial.hpp>
-MySerial mySerial(actuator, andonLight, motors);
+MySerial mySerial(actuator, motors);
 
 #include <BatteryMonitor.hpp>
 BatteryMonitor batteryMonitor;
@@ -96,7 +96,7 @@ void setup() {
 
   delay(200);
   M7Timer.attachInterruptInterval(100, m7timer);
-  andonLight.setup();
+  //andonLight.setup();
   mySerial.setup();
   motors.setup();
   //motors.RESET();
@@ -104,14 +104,13 @@ void setup() {
   ultrasonic.setup();
   ultrasonic.attachMotors(motors);
   ultrasonicServo.setup();
-  //encoder.setup();
   actuator.setup ();
   jogControl.setup();
   //batteryMonitor.setup();
 }
 
 void loop() {
-  andonLight.loop();
+  //andonLight.loop();
   mySerial.stateMachine();
   motors.stateMachine();
 
@@ -128,7 +127,6 @@ void loop() {
     }
     //Serial.println();
   }
-
 
   static unsigned long lastPrint = 0;
   if (millis() - lastPrint > 500) { // every 0.5s
@@ -150,9 +148,7 @@ void loop() {
       ultrasonicServo.deactivate(); // Servo inactive when ultrasonic is disabled
   }
 
-
   actuator.stateMachine();
-  //encoder.stateMachine();
   jogControl.update();
   //batteryMonitor.stateMachine();
 }

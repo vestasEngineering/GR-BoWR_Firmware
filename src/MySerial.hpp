@@ -4,7 +4,7 @@
 #include <ArduinoJson.h>
 #include <Actuator.hpp>
 //#include "Ext_Encoder.hpp"
-#include "AndonLight.hpp"  
+//#include "AndonLight.hpp"  
 #include "Motors.hpp"
 #include <vector>
 
@@ -36,12 +36,15 @@ public:
 
     ActuatorControl* actuator;
     //ExtEncoder* encoder;
-    AndonLight* andonLight;
+    //AndonLight* andonLight;
     Motors* motors;
 
-    MySerial(ActuatorControl& actuatorRef, AndonLight& lightRef, Motors& motorsRef)
-    : actuator(&actuatorRef), andonLight(&lightRef), motors(&motorsRef) {}
 
+    MySerial(ActuatorControl& actuatorRef, Motors& motorsRef)
+    : actuator(&actuatorRef), motors(&motorsRef) {}
+
+    //MySerial(ActuatorControl& actuatorRef, AndonLight& lightRef, Motors& motorsRef)
+    //: actuator(&actuatorRef), andonLight(&lightRef), motors(&motorsRef) {}
 
 
     enum States{ CONNECTED, DISCONNECTED};
@@ -210,10 +213,12 @@ public:
             }
 
             else if (action.equalsIgnoreCase("reset_encoder")) {
-                //encoder->position = 0;
+                for (int axis = 0; axis < 4; axis++) {
+                    motors->resetAPOS(axis);
+                }
 
                 StaticJsonDocument<64> response;
-                response["status"] = "Encoder reset";
+                response["status"] = "All encoders reset";
                 serializeJson(response, Serial);
                 Serial.println();
             }
@@ -229,7 +234,7 @@ public:
                 }
 
                 String stateStr = jsonPacket["state"];
-                AndonLight::States newState;
+                /*AndonLight::States newState;
 
                 if (stateStr.equalsIgnoreCase("GREEN")) newState = AndonLight::GREEN;
                 else if (stateStr.equalsIgnoreCase("YELLOW")) newState = AndonLight::YELLOW;
@@ -252,6 +257,7 @@ public:
                 response["state"] = stateStr;
                 serializeJson(response, Serial);
                 Serial.println();
+                */
             }
 
 
@@ -262,8 +268,9 @@ public:
                 triggerBuffer.clear();
             }
 
-            JsonArray triggers = jsonPacket["triggers"].as<JsonArray>();
-            for (JsonObject t : triggers) {
+            // Prefer a single trigger to minimize memory
+            if (jsonPacket.containsKey("trigger")) {
+                JsonObject t = jsonPacket["trigger"].as<JsonObject>();
                 if (t.containsKey("threshold") && t.containsKey("activate") &&
                     t.containsKey("deactivate") && t.containsKey("delay")) {
 
@@ -274,7 +281,26 @@ public:
                     trig.delay_seconds = t["delay"];
                     triggerBuffer.push_back(trig);
                 } else {
-                    Serial.println("Invalid trigger format");
+                    Serial.println("Invalid single trigger format");
+                }
+            }
+
+            // Still support an array if provided
+            if (jsonPacket.containsKey("triggers")) {
+                JsonArray triggers = jsonPacket["triggers"].as<JsonArray>();
+                for (JsonObject t : triggers) {
+                    if (t.containsKey("threshold") && t.containsKey("activate") &&
+                        t.containsKey("deactivate") && t.containsKey("delay")) {
+
+                        Trigger trig;
+                        trig.threshold = t["threshold"];
+                        trig.activate_channel = t["activate"];
+                        trig.deactivate_channel = t["deactivate"];
+                        trig.delay_seconds = t["delay"];
+                        triggerBuffer.push_back(trig);
+                    } else {
+                        Serial.println("Invalid trigger format");
+                    }
                 }
             }
 
@@ -285,24 +311,11 @@ public:
             Serial.println();
         }
 
-        else if (action.equalsIgnoreCase("reset_triggers")) {
-            for (auto& trig : triggerBuffer) {
-                trig.triggered = false;
-                trig.waitingToDeactivate = false;
-                trig.triggerTime = 0;
-            }
-
-            StaticJsonDocument<64> response;
-            response["status"] = "triggers_reset";
-            serializeJson(response, Serial);
-            Serial.println();
-        }
-
         else if (action.equalsIgnoreCase("start_process")) {
             ultrasonicEnabled = true;
             ultrasonic.processSpeed = 0.0;
             ultrasonic.currentSpeed = 0.0;
-            andonLight->setState(AndonLight::BLINK_GREEN);
+            //andonLight->setState(AndonLight::BLINK_GREEN);
 
             StaticJsonDocument<64> response;
             response["status"] = "process_started";
@@ -313,7 +326,7 @@ public:
         else if (action.equalsIgnoreCase("stop_process")) {
             ultrasonicEnabled = false;
             motors->STOP();
-            andonLight->setState(AndonLight::GREEN);
+            //andonLight->setState(AndonLight::GREEN);
 
             StaticJsonDocument<64> response;
             response["status"] = "process_stopped";
@@ -336,7 +349,7 @@ public:
         else if (action.equalsIgnoreCase("shutdown")) {
             motors->STOP();
             ultrasonicEnabled = false;
-            andonLight->setState(AndonLight::GREEN);
+            //andonLight->setState(AndonLight::GREEN);
             triggerBuffer.clear();
             serialStarted = false;  // Optional: block further commands until reinitialized
             StaticJsonDocument<64> response;

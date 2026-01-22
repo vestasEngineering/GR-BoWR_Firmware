@@ -47,7 +47,7 @@ public:
         strip.show(); // Initialize all pixels
         startBootAnimation(); // Run boot-up animation
         Serial.println("{\"status\": \"AndonLight initialized successfully.\"}");
-        setState(GREEN);
+        setState(YELLOW);
     }
 
     void loop() {

@@ -20,7 +20,7 @@ public:
     float currentSpeed = 0.0;
     float processSpeed = 0.0;
 
-    float setPoint = 124.0;
+    float setPoint = 180.0;
     float tolerance = 2.0;
     float lowerLimit = setPoint - tolerance;
     float upperLimit = setPoint + tolerance;
@@ -58,8 +58,8 @@ public:
             measuredDistance = voltage * mmPerVolt + offsetDistance;
         
             // Debug: Print measured distance to Serial Monitor
-            //Serial.print("Measured Distance: ");
-            //Serial.println(measuredDistance);
+            Serial.print("Measured Distance: ");
+            Serial.println(measuredDistance);
 
 
             if (!isValidMeasurement(measuredDistance)) {

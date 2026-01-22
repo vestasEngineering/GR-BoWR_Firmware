@@ -91,8 +91,12 @@ public:
             CAN.write(query);
         }
 
-        // Return the average of APOS readings for motors 3 & 4
-        return (positions[2] + positions[3]) * 0.5f; // in revolutions
+        // Average encoder counts
+        float avgCounts = (positions[2] + positions[3]) * 0.5f;
+
+        // Convert to mm using conversion factor factor
+        const float ENCODER_TO_MM = 310.0f / 280.0f; // ≈ 1.1071
+        return avgCounts * ENCODER_TO_MM;
     }
 
 
