@@ -3,68 +3,72 @@
 
 #include <Arduino.h>
 #include "Motors.hpp"
-#include "MySerial.hpp"
+
+class MySerial;
 
 class JogControl {
 public:
-    const int FORWARD_JOG_PIN = D1;
-    const int BACKWARD_JOG_PIN = D10;
+    // Pins & constants
+    static constexpr int FORWARD_JOG_PIN  = D1;
+    static constexpr int BACKWARD_JOG_PIN = D10;
 
-    float jogSpeed = 0.0;
-    const float jogSpeedIncrement = 0.02; // m/s per loop
-    const float jogSpeedMax = 0.02;       // max jog speed
+    static constexpr float jogSpeedIncrement = 0.02f; // m/s per loop (unused in current code)
+    static constexpr float jogSpeedMax       = 0.02f; // max jog speed
+    static constexpr unsigned long jogDurationMs = 1000;
 
-    bool jogActive = false;
-    int jogDirection = 0; // +1 for forward, -1 for backward
-    unsigned long jogStartTime = 0;
-    const unsigned long jogDuration = 1000;
-
-    Motors* motors;
-    MySerial* mySerial;
-
-    JogControl(Motors& motorsRef, MySerial& serialRef)
-        : motors(&motorsRef), mySerial(&serialRef) {}
+    explicit JogControl(Motors& motorsRef, MySerial& serialRef)
+        : motors(motorsRef), mySerial(serialRef) {}
 
     void setup() {
-        pinMode(FORWARD_JOG_PIN, INPUT_PULLUP);
+        pinMode(FORWARD_JOG_PIN,  INPUT_PULLUP);
         pinMode(BACKWARD_JOG_PIN, INPUT_PULLUP);
     }
 
     void update() {
         // Optional: only jog when disconnected from Linux
-        // if (mySerial->state != MySerial::DISCONNECTED) {
+        // if (mySerial.state != MySerial::LinkState::DISCONNECTED) {
         //     return;
         // }
 
-        bool forwardPressed = !digitalRead(FORWARD_JOG_PIN);
-        bool backwardPressed = !digitalRead(BACKWARD_JOG_PIN);
+        const bool forwardPressed  = !digitalRead(FORWARD_JOG_PIN);
+        const bool backwardPressed = !digitalRead(BACKWARD_JOG_PIN);
 
         // Start jog only on new press
         if ((forwardPressed || backwardPressed) && !jogActive) {
-            jogActive = true;
+            jogActive    = true;
             jogStartTime = millis();
             jogDirection = forwardPressed ? 1 : -1;
         }
 
         // If jog is active, check duration
         if (jogActive) {
-            if (millis() - jogStartTime < jogDuration) {
-                float jogSpeed = jogDirection * jogSpeedMax;
-                motors->speeds[0] = -jogSpeed;
-                motors->speeds[1] = -jogSpeed;
-                motors->speeds[2] =  jogSpeed;
-                motors->speeds[3] =  jogSpeed;
+            if (millis() - jogStartTime < jogDurationMs) {
+                const float v = jogDirection * jogSpeedMax;
+                motors.speeds[0] = -v;
+                motors.speeds[1] = -v;
+                motors.speeds[2] =  v;
+                motors.speeds[3] =  v;
             } else {
                 // Stop motors and reset jog
-                motors->speeds[0] = 0.0;
-                motors->speeds[1] = 0.0;
-                motors->speeds[2] = 0.0;
-                motors->speeds[3] = 0.0;
-                jogActive = false;
+                motors.speeds[0] = 0.0f;
+                motors.speeds[1] = 0.0f;
+                motors.speeds[2] = 0.0f;
+                motors.speeds[3] = 0.0f;
+                jogActive    = false;
                 jogDirection = 0;
             }
         }
     }
+
+    bool isActive() const { return jogActive; }
+
+private:
+    Motors&    motors;
+    MySerial&  mySerial;
+
+    bool            jogActive     = false;
+    int             jogDirection  = 0; // +1 forward, -1 backward
+    unsigned long   jogStartTime  = 0;
 };
 
 #endif

@@ -24,17 +24,14 @@ bool ultrasonicEnabled = false;
 #include <UltrasonicServo.hpp>
 UltrasonicServo ultrasonicServo;
 
-//#include <Ext_Encoder.hpp>
-//ExtEncoder encoder;
-
 #include <Actuator.hpp>
 ActuatorControl actuator;
 
-//#include <AndonLight.hpp>
-//AndonLight andonLight;
+#include <AndonLight.hpp>
+AndonLight andonLight;
 
 #include <MySerial.hpp>
-MySerial mySerial(actuator, motors);
+MySerial mySerial(actuator, andonLight, motors);
 
 #include <BatteryMonitor.hpp>
 BatteryMonitor batteryMonitor;
@@ -42,24 +39,25 @@ BatteryMonitor batteryMonitor;
 #include "JogControl.hpp"
 JogControl jogControl(motors, mySerial);
 
+#include "AndonManager.hpp"
+AndonManager andonMgr(andonLight, mySerial, motors, actuator, jogControl, batteryMonitor, ultrasonic, ultrasonicServo);
+
+#include "BootHealth.hpp"
+
 #include "Portenta_H7_TimerInterrupt.h"
 volatile int interruptCounter = 0;
 void m7timer() { 
   // every 1/10,000 second - 10,000hz - 0.0001 second
   interruptCounter++;
 
-  //if(encoder.thisDelay) encoder.thisDelay--;
   //if(mySerial.delay) mySerial.delay--;
-
-  if(mySerial.receiveDelay) mySerial.receiveDelay--;
 
   // every 10/10,000 second - 1,000hz - 0.001 second
   if ((interruptCounter % 10) == 0) { 
-     // this can indicate if something is taking way to long?
-
       if(motors.thisDelay) motors.thisDelay--;
       if(mySerial.thisDelay) mySerial.thisDelay--;
       if(mySerial.timeout) mySerial.timeout--;
+      if (mySerial.receiveDelay) mySerial.receiveDelay--;
 
   }
 
@@ -92,21 +90,39 @@ void setup() {
   while (!Serial) {
     delay(10);
   }
-  Serial.println("Serial Starting");
+
+  Serial.println("{\"status\":\"boot\",\"msg\":\"Serial Starting\"}");
 
   delay(200);
   M7Timer.attachInterruptInterval(100, m7timer);
   //andonLight.setup();
   mySerial.setup();
   motors.setup();
-  //motors.RESET();
-  //motors.setAcceleration(0);
   ultrasonic.setup();
+  mySerial.attachAndonManager(andonMgr);
+  mySerial.attachUltrasonic(ultrasonic, ultrasonicEnabled);
+  mySerial.attachUltrasonicServo(ultrasonicServo);
   ultrasonic.attachMotors(motors);
   ultrasonicServo.setup();
   actuator.setup ();
   jogControl.setup();
-  //batteryMonitor.setup();
+  batteryMonitor.setup();
+  andonMgr.setup();
+
+  // --- Boot health check: probe subsystems and emit one JSON line to Raspberry Pi ---
+  BootHealth::Report rep = BootHealth::run(
+      andonLight,
+      motors,
+      actuator,
+      ultrasonic,
+      ultrasonicServo,
+      /*battery=*/&batteryMonitor,
+      /*can_timeout_ms=*/500
+  );
+  BootHealth::sendReport(rep);
+
+  //If boot health fails, latch Andon to BLINK_RED (until manual override)
+  //if (!rep.ok) andonMgr.setOverride(AndonLight::BLINK_RED);
 }
 
 void loop() {
@@ -150,5 +166,6 @@ void loop() {
 
   actuator.stateMachine();
   jogControl.update();
-  //batteryMonitor.stateMachine();
+  batteryMonitor.stateMachine();
+  andonMgr.tick();
 }

@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <Arduino_CAN.h>
+#include <ArduinoJson.h>
 
 class Motors {
 public:
@@ -11,6 +12,8 @@ public:
     float erefs = 0.0;
     const float wheelDiameter = 0.048;
     const int ENCODER_CPR = 4096; // Adjust based on your encoder resolution
+    uint32_t lastAposMs = 0;  // throttle APOS to 50 Hz
+    bool queryAllAxes = false; // set true if you want all 4 axes later
 
     uint8_t EREFS_HEXDATA[4];
 
@@ -36,9 +39,9 @@ public:
 
     void setup() {
         if (!CAN.begin(CanBitRate::BR_250k)) {
-            Serial.println("CAN.begin(...) failed.");
+            Serial.println("{\"error\":\"can_init_failed\"}");
             while (true) {
-                Serial.println("CAN ISSUE");
+                //Serial.println("CAN ISSUE");
                 delay(1000);
             }
         }
@@ -78,7 +81,10 @@ public:
             CanMsg stopCmd(CanExtendedId(MOTOR_EREFS_IDS[i]), sizeof(hexdata), hexdata);
             CAN.write(stopCmd);
         }
-        Serial.println("[Motors] STOP command sent to all axes.");
+        StaticJsonDocument<96> doc;
+        doc["motors"] = "stop_all";
+        serializeJson(doc, Serial); Serial.println();
+
     }
 
 
@@ -99,34 +105,56 @@ public:
         return avgCounts * ENCODER_TO_MM;
     }
 
+    // Send APOS query at most 50 Hz (every 20 ms). Default: axes 2 and 3. Reduced CAN load.
+    void requestAPOSThrottled() {
+        const uint32_t now = millis();
+        if ((int32_t)(now - lastAposMs) < 20) {
+            // Too soon; skip this cycle
+            return;
+        }
+        lastAposMs = now;
+
+        if (queryAllAxes) {
+            for (uint8_t axis = 0; axis < 4; ++axis) {
+                uint8_t aposCmd[4] = {0x11, 0x00, 0x28, 0x02}; // MPL APOS query
+                CanMsg query(CanExtendedId(MOTOR_APOS_IDS[axis]), sizeof(aposCmd), aposCmd);
+                CAN.write(query);
+            }
+        } else {
+            for (uint8_t axis = 2; axis <= 3; ++axis) {
+                uint8_t aposCmd[4] = {0x11, 0x00, 0x28, 0x02};
+                CanMsg query(CanExtendedId(MOTOR_APOS_IDS[axis]), sizeof(aposCmd), aposCmd);
+                CAN.write(query);
+            }
+        }
+    }
 
     void resetAPOS(uint8_t axis) {
         if (axis >= 4) {
-            Serial.println("[RESET] Invalid axis index!");
+            StaticJsonDocument<64> err;
+            err["error"] = "reset_invalid_axis";
+            err["axis"]  = axis;
+            serializeJson(err, Serial); Serial.println();
             return;
         }
 
-        // CAN IDs for APOS reset
-        const uint32_t RESET_APOS_IDS[4] = {
-            0x00802002, 0x00804002, 0x00806002, 0x00808002
-        };
-
-        // Empty payload (or zeros if required)
+        const uint32_t RESET_APOS_IDS[4] = { 0x00802002, 0x00804002, 0x00806002, 0x00808002 };
         uint8_t resetData[4] = {0x00, 0x00, 0x00, 0x00};
-
-        // Create CAN message with the reset ID
         CanMsg resetCmd(CanExtendedId(RESET_APOS_IDS[axis]), sizeof(resetData), resetData);
 
-        if (CAN.write(resetCmd)) {
-            Serial.print("[RESET] Encoder reset sent to axis ");
-            Serial.print(axis + 1);
-            Serial.print(" (ID: 0x");
-            Serial.print(RESET_APOS_IDS[axis], HEX);
-            Serial.println(")");
-        } else {
-            Serial.print("[RESET] Failed to send encoder reset to axis ");
-            Serial.println(axis + 1);
-        }
+        bool ok = CAN.write(resetCmd);
+
+        StaticJsonDocument<160> doc;
+        doc["type"]  = "encoder_reset";
+        doc["axis"]  = axis + 1;
+        doc["ok"]    = ok;
+        doc["id"]    = RESET_APOS_IDS[axis]; // decimal is fine for JSON
+        // Optional hex string:
+        char hexbuf[12];
+        snprintf(hexbuf, sizeof(hexbuf), "0x%08lX", (unsigned long)RESET_APOS_IDS[axis]);
+        doc["id_hex"] = hexbuf;
+
+        serializeJson(doc, Serial); Serial.println();
     }
 
     // Handle CAN responses (APOS)
@@ -186,9 +214,15 @@ public:
                     CanMsg MOTOR_SET_EREFS(CanExtendedId(MOTOR_EREFS_IDS[index]), sizeof(EREFS_HEXDATA), EREFS_HEXDATA); // to can message
                     //Serial.println(MOTOR_SET_EREFS);
                     receipts[index] = CAN.write(MOTOR_SET_EREFS);
-                    requestAPOS();
-                    //Serial.println(requestAPOS());
                     index++; // 0 , 1 , 2 , 3
+                    
+                    if (index == 4) {
+                        index = 0;
+                        requestAPOSThrottled();
+                        //Serial.println(requestAPOSThrottled());
+                        thisDelay = 10;
+                        state = WAITING;
+                    }
 
                     if (index == 4)
                     {

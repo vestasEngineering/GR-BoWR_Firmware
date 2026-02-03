@@ -1,3 +1,4 @@
+
 #ifndef BATTERY_MONITOR
 #define BATTERY_MONITOR
 
@@ -5,6 +6,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <math.h>
 
 #define BATTERY_PIN A0
 #define SCREEN_WIDTH 128
@@ -13,11 +15,13 @@
 #define MAX_BATTERY_VOLTAGE 20.0
 #define MIN_BATTERY_VOLTAGE 16.5
 
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+extern Adafruit_SSD1306 display;
 
 class BatteryMonitor {
 public:
     float voltage = 0.0;
+    float lastPercentage = NAN;
+    bool  displayOk = false;
     const float R1 = 100000.0;
     const float R2 = 10000.0;
     const float VREF = 3.1;
@@ -27,29 +31,54 @@ public:
     int sampleIndex = 0;
     bool bufferFilled = false;
 
-    enum States {
-        READING,
-        DISPLAYING,
-    };
+    enum States { READING, DISPLAYING };
     States state;
 
     void setup(void) {
         analogReadResolution(10);
 
-        if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-            Serial.println(F("SSD1306 allocation failed"));
-            while (true); // Halt
+        Wire.begin();
+
+        // Try to init OLED; if not present, keep running headless.
+        if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+            displayOk = true;
+        } else {
+            displayOk = false;
+            Serial.println(F("{\"battery\":\"oled_not_found_running_headless\"}"));
         }
 
-        display.clearDisplay();
-        display.setTextSize(3);
-        display.setTextColor(SSD1306_WHITE);
-        display.setCursor(0, 0);
-        display.println("GR-LRR");
-        display.display();
-        delay(2000);
+        if (displayOk) {
+            display.clearDisplay();
+            display.setTextSize(3);
+            display.setTextColor(SSD1306_WHITE);
+            display.setCursor(0, 0);
+            display.println("GR-LRR");
+            display.display();
+            delay(2000);
+       }
 
         state = READING;
+    }
+
+    // Compute battery % from current voltage
+    float computePercentage(float v) const {
+        float pct = (v - MIN_BATTERY_VOLTAGE) / (MAX_BATTERY_VOLTAGE - MIN_BATTERY_VOLTAGE) * 100.0f;
+        if (pct < 0.0f) pct = 0.0f;
+        if (pct > 100.0f) pct = 100.0f;
+        return pct;
+    }
+
+    // Public helpers for AndonManager
+    bool isLow(float thresholdPercent = 20.0f) const {
+        float pct = isnan(lastPercentage) ? computePercentage(voltage) : lastPercentage;
+        return pct <= thresholdPercent;
+    }
+    bool isCritical(float thresholdPercent = 10.0f) const {
+        float pct = isnan(lastPercentage) ? computePercentage(voltage) : lastPercentage;
+        return pct <= thresholdPercent;
+    }
+    float getPercentage() const {
+        return isnan(lastPercentage) ? computePercentage(voltage) : lastPercentage;
     }
 
     void readBatteryVoltage(void) {
@@ -67,16 +96,21 @@ public:
             sum += voltageSamples[i];
         }
         voltage = sum / count;
+        lastPercentage = computePercentage(voltage);
     }
 
-    void drawVoltage(float voltage) {
+    void drawVoltage(float v) {
+        if (!displayOk) return;
+
         display.setTextSize(2);
         display.setCursor(0, 0);
         display.print("V: ");
-        display.print(voltage, 1); // One decimal place
+        display.print(v, 1);
     }
 
     void drawPercentage(float percentage) {
+        if (!displayOk) return;
+
         display.setTextSize(2);
         display.setCursor(0, 20);
         display.print("Chg: ");
@@ -85,22 +119,21 @@ public:
     }
 
     void drawBatteryIcon(float percentage) {
+        if (!displayOk) return;
         int iconX = 100;
         int iconY = 0;
         int iconWidth = 20;
         int iconHeight = 12;
 
-        // Outline
         display.drawRect(iconX, iconY, iconWidth, iconHeight, SSD1306_WHITE);
-        // Tip
         display.fillRect(iconX + iconWidth, iconY + 4, 2, 4, SSD1306_WHITE);
 
-        // Fill level
         int fillWidth = (percentage / 100.0) * (iconWidth - 2);
         display.fillRect(iconX + 1, iconY + 1, fillWidth, iconHeight - 2, SSD1306_WHITE);
     }
 
     void drawGaugeBar(float percentage) {
+        if (!displayOk) return;
         int gaugeX = 14;
         int gaugeY = 45;
         int gaugeHeight = 10;
@@ -112,9 +145,10 @@ public:
     }
 
     void displayVoltage(void) {
-        float batteryPercentage = (voltage - MIN_BATTERY_VOLTAGE) / (MAX_BATTERY_VOLTAGE - MIN_BATTERY_VOLTAGE) * 100.0;
-        batteryPercentage = constrain(batteryPercentage, 0.0, 100.0);
+        float batteryPercentage = computePercentage(voltage);
+        lastPercentage = batteryPercentage;
 
+        if (!displayOk) return;
         display.clearDisplay();
 
         drawVoltage(voltage);
@@ -127,16 +161,14 @@ public:
 
     void stateMachine() {
         switch (state) {
-            case READING:
-                readBatteryVoltage();
-                state = DISPLAYING;
+            case READING:    readBatteryVoltage(); state = DISPLAYING; break;
+            case DISPLAYING: 
+                if (displayOk) {
+                    displayVoltage();
+                }
+                state = READING;    
                 break;
-            case DISPLAYING:
-                displayVoltage();
-                state = READING;
-                break;
-            default:
-                break;
+            default: break;
         }
     }
 };

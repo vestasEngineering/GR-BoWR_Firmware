@@ -25,6 +25,8 @@ public:
     float lowerLimit = setPoint - tolerance;
     float upperLimit = setPoint + tolerance;
 
+    uint16_t badReadStreak = 0;
+
     Motors* motors;
 
     PID pid = PID(3.5, 0.3, 0.08, setPoint);
@@ -56,15 +58,28 @@ public:
             // Read and smooth distance
             voltage = (float(analogRead(ULTRASONIC_PIN)) * 3.1 / 1023.0);
             measuredDistance = voltage * mmPerVolt + offsetDistance;
-        
-            // Debug: Print measured distance to Serial Monitor
-            Serial.print("Measured Distance: ");
-            Serial.println(measuredDistance);
+
+            // Debug
+            // Serial.print("Measured Distance: ");
+            // Serial.println(measuredDistance);
+
+            // BAD reading detection (value ~ 40 mm)
+            const bool isBad40 = (measuredDistance >= 39.5f && measuredDistance <= 40.5f);
 
 
             if (!isValidMeasurement(measuredDistance)) {
-                delay = 10;
+                // Count only the specific 40 mm signature for the Andon condition
+                if (isBad40) {
+                    if (badReadStreak < 0xFFFF) badReadStreak++;
+                } else {
+                    // Invalid but not the 40 mm signature → don't count for this Andon rule.
+                    // If you want to count ALL invalids, increment here instead.
+                }
+                delay = 10; // 10 ms
                 return;
+            } else {
+                // Valid reading resets the streak
+                badReadStreak = 0;
             }
 
             distance[0] = distance[0] + (measuredDistance - distance[0]) * 0.80;
