@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <Arduino_CAN.h>
 #include <ArduinoJson.h>
+#include "Config.hpp"
 
 class Motors {
 public:
@@ -68,7 +69,7 @@ public:
         float angularVelocity = ms / wheelDiameter;  // 0.1 m/s /m = 1/s
         float rpm = angularVelocity / 0.10471975057; // convert from rads/s to rpm
         // std::cout<<"EREFS: " << rpm * 18.7187185 << "\n";
-        return rpm * 18.7187185; // this was pulled from the eletrocraft setup file
+        return rpm * CFG.motors.erefs_k; // this was pulled from the eletrocraft setup file
     }
 
     // Stop all motors
@@ -107,27 +108,27 @@ public:
 
     // Send APOS query at most 50 Hz (every 20 ms). Default: axes 2 and 3. Reduced CAN load.
     void requestAPOSThrottled() {
+        static uint32_t lastAposMs = 0;
         const uint32_t now = millis();
-        if ((int32_t)(now - lastAposMs) < 20) {
-            // Too soon; skip this cycle
-            return;
-        }
+        const uint16_t periodMs = max<uint16_t>(1, 1000 / CFG.motors.apos_hz);
+        if ((int32_t)(now - lastAposMs) < periodMs) return;
         lastAposMs = now;
 
-        if (queryAllAxes) {
+        if (CFG.motors.apos_query_all) {
             for (uint8_t axis = 0; axis < 4; ++axis) {
-                uint8_t aposCmd[4] = {0x11, 0x00, 0x28, 0x02}; // MPL APOS query
-                CanMsg query(CanExtendedId(MOTOR_APOS_IDS[axis]), sizeof(aposCmd), aposCmd);
+                uint8_t aposCmd[4] = {0x11, 0x00, 0x28, 0x02};
+                CanMsg query(CanExtendedId(CFG.motors.apos_ids[axis]), sizeof(aposCmd), aposCmd);
                 CAN.write(query);
             }
         } else {
             for (uint8_t axis = 2; axis <= 3; ++axis) {
                 uint8_t aposCmd[4] = {0x11, 0x00, 0x28, 0x02};
-                CanMsg query(CanExtendedId(MOTOR_APOS_IDS[axis]), sizeof(aposCmd), aposCmd);
+                CanMsg query(CanExtendedId(CFG.motors.apos_ids[axis]), sizeof(aposCmd), aposCmd);
                 CAN.write(query);
             }
         }
     }
+
 
     void resetAPOS(uint8_t axis) {
         if (axis >= 4) {

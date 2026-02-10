@@ -1,6 +1,7 @@
 #ifndef ACTUATOR_CONTROL_H
 #define ACTUATOR_CONTROL_H
 
+#include "Config.hpp"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
@@ -65,31 +66,18 @@ public:
         Wire.begin();
         Serial.println("{\"status\": \"Initializing ActuatorControl...\"}");
 
-        // DAC init
-        if (!dac.begin()) {
-            pcbFault_ = true;
-            Serial.println("{\"status\":\"MCP4728 init FAILED\",\"fault\":\"pcb\"}");
-        } else {
-            Serial.println("{\"status\":\"MCP4728 init OK\"}");
-        }
-        
-        // ADC init
-        if (!adc.begin()) {
-            pcbFault_ = true;
-            Serial.println("{\"status\":\"ADS1115 init FAILED\",\"fault\":\"pcb\"}");
-        } else {
-            Serial.println("{\"status\":\"ADS1115 init OK\"}");
-        }
+        if (!dac.begin()) { pcbFault_ = true; Serial.println("{\"status\":\"MCP4728 init FAILED\",\"fault\":\"pcb\"}"); }
+        else              { Serial.println("{\"status\":\"MCP4728 init OK\"}"); }
+
+        if (!adc.begin()) { pcbFault_ = true; Serial.println("{\"status\":\"ADS1115 init FAILED\",\"fault\":\"pcb\"}"); }
+        else              { Serial.println("{\"status\":\"ADS1115 init OK\"}"); }
 
         state = SET_POSITION;
     }
 
     void writeDAC(uint8_t channel, float voltage) {
-        // Bounds
-        voltage = constrain(voltage, 0.0f, MAX_VOLTAGE);
-
-        // Scale to 12-bit
-        uint16_t dacValue = (uint16_t)((voltage / MAX_VOLTAGE) * 4095.0f);
+        const float v = constrain(voltage, 0.0f, CFG.actuator.maxCommandVoltage);
+        uint16_t dacValue = (uint16_t)((v / CFG.actuator.maxCommandVoltage) * 4095.0f);
 
         MCP4728_channel_t channelEnum;
         switch (channel) {
@@ -107,17 +95,15 @@ public:
 
         // If PCB fault, skip actual writes to avoid spurious I2C traffic
         if (pcbFault_) return;
-
         (void)dac.setChannelValue(channelEnum, dacValue, MCP4728_VREF_VDD, MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL);
     }
 
     float readADC(uint8_t channel) {
-        if (pcbFault_) return 0.0f; // no reliable read if PCB fault
+        if (pcbFault_) return 0.0f;
         int16_t rawValue = adc.readADC_SingleEnded(channel);
-        // Scale raw (-32768..32767) to 0..MAX_FEEDBACK; adjust if you change PGA
-        float voltage = (rawValue / 32767.0f) * MAX_FEEDBACK;
+        float voltage = (rawValue / 32767.0f) * CFG.actuator.maxFeedbackVoltage;  // PGA note unchanged
         if (voltage < 0.0f) voltage = 0.0f;
-        if (voltage > MAX_FEEDBACK) voltage = MAX_FEEDBACK;
+        if (voltage > CFG.actuator.maxFeedbackVoltage) voltage = CFG.actuator.maxFeedbackVoltage;
         return voltage;
     }
 
@@ -129,31 +115,22 @@ public:
                     const float cmdV = actuatorPositions[i];
                     writeDAC(i, cmdV);
 
-                    // Recognize endpoint requests
-                    const bool reqActivate   = (cmdV >= epCfg.activate_cmd_min_v);
-                    const bool reqDeactivate = (cmdV <= epCfg.deactivate_cmd_max_v);
+                    const bool reqActivate   = (cmdV >= CFG.actuator.activate_cmd_min_v);
+                    const bool reqDeactivate = (cmdV <= CFG.actuator.deactivate_cmd_max_v);
 
-                    // Arm a check when the requested endpoint state changes
                     if (reqActivate && (lastRequestedActive[i] != true)) {
                         lastRequestedActive[i] = true;
                         expectedActive[i]      = true;
-                        checkAtMs[i]           = now + epCfg.settle_ms;
+                        checkAtMs[i]           = now + CFG.actuator.settle_ms;
                         checkArmed[i]          = true;
-                        jammed[i]              = false;  // clear old jam on new request
-
-                        // Optional debug:
-                        // Serial.printf("{\"act_arm\":%u,\"type\":\"activate\",\"ms\":%lu}\n", i, (unsigned long)checkAtMs[i]);
+                        jammed[i]              = false;
                     } else if (reqDeactivate && (lastRequestedActive[i] != false)) {
                         lastRequestedActive[i] = false;
                         expectedActive[i]      = false;
-                        checkAtMs[i]           = now + epCfg.settle_ms;
+                        checkAtMs[i]           = now + CFG.actuator.settle_ms;
                         checkArmed[i]          = true;
                         jammed[i]              = false;
-
-                        // Optional debug:
-                        // Serial.printf("{\"act_arm\":%u,\"type\":\"deactivate\",\"ms\":%lu}\n", i, (unsigned long)checkAtMs[i]);
                     }
-                    // If command is mid-range, we don't arm a check.
                 }
                 state = READ_FEEDBACK;
             } break;
@@ -163,33 +140,23 @@ public:
                 for (uint8_t i = 0; i < NUM_ACTUATORS; i++) {
                     feedbackSignals[i] = readADC(i);
 
-                    if (checkArmed[i] && ( (int32_t)(now - checkAtMs[i]) >= 0 )) {
-                        // Time to evaluate endpoint success/failure
+                    if (checkArmed[i] && ((int32_t)(now - checkAtMs[i]) >= 0)) {
                         if (expectedActive[i]) {
-                            // Expect high feedback
-                            const float err = (epCfg.active_fb_min_v - feedbackSignals[i]); // negative if OK
-                            lastErrV[i] = err;
-                            if (feedbackSignals[i] < epCfg.active_fb_min_v) {
+                            lastErrV[i] = (CFG.actuator.active_fb_min_v - feedbackSignals[i]);
+                            if (feedbackSignals[i] < CFG.actuator.active_fb_min_v) {
                                 jammed[i] = true;
-                                // Serial.printf("{\"act_jam\":%u,\"exp\":\">=%.2f\",\"fb\":%.2f}\n", i, epCfg.active_fb_min_v, feedbackSignals[i]);
                             }
                         } else {
-                            // Expect low feedback
-                            const float err = (feedbackSignals[i] - epCfg.inactive_fb_max_v); // negative if OK
-                            lastErrV[i] = err;
-                            if (feedbackSignals[i] > epCfg.inactive_fb_max_v) {
+                            lastErrV[i] = (feedbackSignals[i] - CFG.actuator.inactive_fb_max_v);
+                            if (feedbackSignals[i] > CFG.actuator.inactive_fb_max_v) {
                                 jammed[i] = true;
-                                // Serial.printf("{\"act_jam\":%u,\"exp\":\"<=%.2f\",\"fb\":%.2f}\n", i, epCfg.inactive_fb_max_v, feedbackSignals[i]);
                             }
                         }
-                        checkArmed[i] = false; // evaluate once per request
+                        checkArmed[i] = false;
                     }
                 }
-                state = SET_POSITION; 
+                state = SET_POSITION;
             } break;
-
-            default:
-                break;
         }
     }
 
@@ -230,14 +197,10 @@ public:
     
     // ---- Mapping-derived expected feedback for your measured system ----
     // Linear fit from your mapping: fb = m*cmd + b
-    float expectedFeedbackMapped(uint8_t channel, float cmdV) const {
-        (void)channel; // if you later have per-channel fits, use channel
-        const float m = -0.529920101f;
-        const float b =  2.705734968f;
-        float expFb = m * cmdV + b;
-        // Clamp to physical rails
-        if (expFb < 0.0f)       expFb = 0.0f;
-        if (expFb > MAX_FEEDBACK) expFb = MAX_FEEDBACK;
+    float expectedFeedbackMapped(uint8_t /*channel*/, float cmdV) const {
+        float expFb = CFG.actuator.fb_map_m * cmdV + CFG.actuator.fb_map_b;
+        if (expFb < 0.0f) expFb = 0.0f;
+        if (expFb > CFG.actuator.maxFeedbackVoltage) expFb = CFG.actuator.maxFeedbackVoltage;
         return expFb;
     }
 
@@ -252,12 +215,9 @@ public:
         }
         float v = acc / samples;
         if (v < 0.0f) v = 0.0f;
-        if (v > MAX_FEEDBACK) v = MAX_FEEDBACK;
+        if (v > CFG.actuator.maxFeedbackVoltage) v = CFG.actuator.maxFeedbackVoltage;
         return v;
     }
-
-
-
 };
 
 #endif

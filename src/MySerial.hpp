@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include <vector>
 
+#include "Config.hpp"
 #include "AndonLight.hpp"
 #include "Motors.hpp"
 #include "AndonManager.hpp"
@@ -253,7 +254,7 @@ public:
         while (Serial.available() > 0 && newData == false) {
             rc = Serial.read();
             
-            timeout = 2000;
+            timeout = CFG.serial.rx_keepalive_ms;;
 
 
             if (recvInProcess) {
@@ -274,8 +275,8 @@ public:
                 recvInProcess = true;
                 ndx = 0;
 
-                timeout = 2000;
-                receiveDelay = 50;
+                timeout = CFG.serial.rx_keepalive_ms;
+                receiveDelay = CFG.serial.rx_led_flash_ms;
             }
         }
     }

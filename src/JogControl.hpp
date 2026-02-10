@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include "Motors.hpp"
+#include "Config.hpp"
 
 class MySerial;
 
@@ -30,8 +31,9 @@ public:
         //     return;
         // }
 
-        const bool forwardPressed  = !digitalRead(FORWARD_JOG_PIN);
-        const bool backwardPressed = !digitalRead(BACKWARD_JOG_PIN);
+        const bool forwardPressed  = !digitalRead(CFG.jog.pin_forward);
+        const bool backwardPressed = !digitalRead(CFG.jog.pin_backward);
+
 
         // Start jog only on new press
         if ((forwardPressed || backwardPressed) && !jogActive) {
@@ -42,12 +44,10 @@ public:
 
         // If jog is active, check duration
         if (jogActive) {
-            if (millis() - jogStartTime < jogDurationMs) {
-                const float v = jogDirection * jogSpeedMax;
-                motors.speeds[0] = -v;
-                motors.speeds[1] = -v;
-                motors.speeds[2] =  v;
-                motors.speeds[3] =  v;
+            if (millis() - jogStartTime < CFG.jog.jog_duration_ms) {
+                const float v = jogDirection * CFG.jog.jog_speed_max_ms;
+                motors.speeds[0] = -v; motors.speeds[1] = -v;
+                motors.speeds[2] =  v; motors.speeds[3] =  v;
             } else {
                 // Stop motors and reset jog
                 motors.speeds[0] = 0.0f;

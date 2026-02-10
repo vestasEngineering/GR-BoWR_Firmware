@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <Servo.h>
+#include "Config.hpp"
 
 class UltrasonicServo {
 public:
@@ -11,19 +12,13 @@ public:
     UltrasonicServo() : currentState(INACTIVE), activeAngle(10), inactiveAngle(180) {}
 
     void setup() {
-        servo.attach(D4); // Always use PWN pin
+        servo.attach(CFG.ut_servo.pwm_pin); // Always use PWN pin
         deactivate();     // Start in inactive state
     }
 
-    void activate() {
-        servo.write(activeAngle);
-        currentState = ACTIVE;
-    }
+    void activate()   { servo.write(CFG.ut_servo.active_angle_deg); currentState = ACTIVE; }
+    void deactivate() { servo.write(CFG.ut_servo.inactive_angle_deg); currentState = INACTIVE; }
 
-    void deactivate() {
-        servo.write(inactiveAngle);
-        currentState = INACTIVE;
-    }
 
     ServoState getState() const {
         return currentState;

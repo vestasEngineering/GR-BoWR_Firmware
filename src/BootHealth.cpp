@@ -7,7 +7,7 @@
 #include "Ultrasonic.hpp"
 #include "UltrasonicServo.hpp"
 #include "BatteryMonitor.hpp"
-
+#include <Version.hpp>
 #include <Arduino_CAN.h>
 #include <ArduinoJson.h>
 
@@ -144,7 +144,7 @@ Report run(AndonLight& light,
 }
 
 void sendReport(const Report& r) {
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<640> doc;
   doc["type"]  = "boot_health";
   doc["ts_ms"] = millis();
   doc["ok"]    = r.ok;
@@ -180,6 +180,19 @@ void sendReport(const Report& r) {
     bat["voltage"] = r.battery_voltage;
     bat["pct"] = r.battery_pct;
   }
+  
+  {
+  JsonObject fw = doc.createNestedObject("firmware");
+  fw["model"]     = Version::model();
+  fw["fleet_id"]  = Version::fleetId();
+  fw["semver"]    = Version::semver();
+  fw["build"]     = Version::buildStamp();
+  fw["board"]     = Version::board();
+  fw["platform"]  = Version::platform();
+  fw["channel"]   = Version::channel();
+  fw["git"]       = Version::shortGit();
+  }
+
 
   serializeJson(doc, Serial);
   Serial.println();

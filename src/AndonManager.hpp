@@ -19,9 +19,8 @@ public:
     uint16_t comms_grace_ms;
   };
 
-  // 10 Hz, 200 ms debounce, 3 s comms grace
   static constexpr Config kDefaultCfg{100, 200, 3000};
-
+  
   // ---- Fault taxonomy for module-specific reporting ----
   enum class FaultCode : uint8_t {
     BatteryCritical,

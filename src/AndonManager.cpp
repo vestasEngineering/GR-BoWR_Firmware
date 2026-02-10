@@ -7,9 +7,10 @@
 #include "BatteryMonitor.hpp"
 #include "Ultrasonic.hpp"
 #include "UltrasonicServo.hpp"
+#include "Config.hpp"
 
 static constexpr uint16_t kUltrasonicBadStreakThreshold = 20;
-static constexpr float    kUTServoTooCloseThreshold     = 60.0f;  // ✅ NEW
+static constexpr float    kUTServoTooCloseThreshold     = 60.0f;
 constexpr AndonManager::Config AndonManager::kDefaultCfg;
 
 const char* AndonManager::faultToKey(FaultCode f) {
@@ -55,20 +56,19 @@ AndonManager::AndonManager(AndonLight& light,
 : light_(light), link_(link), motors_(motors), actuator_(actuator),
   jog_(jog), battery_(battery), ultrasonic_(ultrasonic), ut_servo_(ut_servo), cfg_(cfg) {}
 
-void AndonManager::setup() {
-  last_tick_ms_  = millis();
-  last_change_ms_ = last_tick_ms_;
-  has_override_  = false;
-  current_       = AndonLight::YELLOW;
-  last_raw_      = AndonLight::YELLOW;
-  startup_grace_until_ = last_tick_ms_ + cfg_.comms_grace_ms;
 
-  // UT servo jam-check init
-  ut_verify_done_   = false;
+void AndonManager::setup() {
+  last_tick_ms_   = millis();
+  last_change_ms_ = last_tick_ms_;
+  has_override_   = false;
+  current_        = AndonLight::YELLOW;
+  last_raw_       = AndonLight::YELLOW;
+  startup_grace_until_ = last_tick_ms_ + CFG.andonMgr.comms_grace_ms;
+
+  ut_verify_done_ = false;
   ut_verify_passed_ = false;
   ut_active_since_ms_ = 0;
-  ut_good_consec_   = 0;
-
+  ut_good_consec_  = 0;
 }
 
 void AndonManager::setOverride(AndonLight::States s) { override_state_ = s; has_override_ = true; }
@@ -77,8 +77,9 @@ AndonLight::States AndonManager::currentState() const { return current_; }
 
 void AndonManager::tick() {
   const auto now = millis();
-  if (now - last_tick_ms_ < cfg_.tick_period_ms) return;
+  if (now - last_tick_ms_ < CFG.andonMgr.tick_period_ms) return;
   last_tick_ms_ = now;
+
 
   AndonLight::States raw;
   if (has_override_) {
@@ -92,7 +93,7 @@ void AndonManager::tick() {
   }
 
   if (raw != last_raw_) { last_raw_ = raw; last_change_ms_ = now; }
-  if (now - last_change_ms_ < cfg_.stable_ms) return;  // debounce
+  if (now - last_change_ms_ < CFG.andonMgr.stable_ms) return;  // debounce
 
   if (raw != current_) {
     current_ = raw;
@@ -152,12 +153,13 @@ void AndonManager::collectFaults(std::vector<AndonManager::FaultCode>& out) cons
   // --- Ultrasonic Servo jam check: verify only during first few seconds of ACTIVE ---
   {
     // Tunables
-    static constexpr uint32_t kVerifyWindowMs    = 3000;   // length of jam-check window after ACTIVE
-    static constexpr float    kMinOkDistance_mm  = 60.0f;  // “not too close” threshold
-    static constexpr uint16_t kConsecGoodNeeded  = 3;      // N consecutive good samples to pass
+    const uint32_t kVerifyWindowMs   = CFG.andonMgr.ut_verify_window_ms;
+    const float    kMinOkDistance_mm = CFG.andonMgr.ut_ok_min_distance;
+    const uint16_t kConsecGoodNeeded = CFG.andonMgr.ut_good_consec;
 
     const uint32_t now = millis();
     const bool isActive = (ut_servo_.getState() == UltrasonicServo::ACTIVE);
+
 
     // Handle state transitions into/out of ACTIVE
     if (isActive) {
@@ -218,12 +220,11 @@ void AndonManager::collectFaults(std::vector<AndonManager::FaultCode>& out) cons
 
 
   // Ultrasonic persistent failure => fault
-  if (ultrasonic_.badReadStreak >= kUltrasonicBadStreakThreshold) {
+  if (ultrasonic_.badReadStreak >= CFG.andonMgr.ultrasonic_bad_streak_threshold) {
     out.push_back(FaultCode::UltrasonicPersistent);
   }
-
-  // Critical battery => fault
-  if (battery_.isCritical(10.0f)) {
+  
+  if (battery_.isCritical(CFG.battery.critical_pct)) {
     out.push_back(FaultCode::BatteryCritical);
   }
 

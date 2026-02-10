@@ -13,6 +13,7 @@
 #include <Arduino.h>
 #include <mbed.h>
 #include <math.h>
+#include "Config.hpp"
 
 #include <Motors.hpp>
 Motors motors;

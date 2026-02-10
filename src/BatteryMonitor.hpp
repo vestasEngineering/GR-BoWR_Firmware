@@ -7,6 +7,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <math.h>
+#include <ArduinoJson.h>
+#include "Config.hpp"
 
 #define BATTERY_PIN A0
 #define SCREEN_WIDTH 128
@@ -30,17 +32,17 @@ public:
     float voltageSamples[NUM_SAMPLES];
     int sampleIndex = 0;
     bool bufferFilled = false;
+    unsigned long lastEmitMs = 0;
+    float         lastEmittedPct = NAN;
 
     enum States { READING, DISPLAYING };
     States state;
 
     void setup(void) {
         analogReadResolution(10);
-
         Wire.begin();
 
-        // Try to init OLED; if not present, keep running headless.
-        if (display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        if (display.begin(SSD1306_SWITCHCAPVCC, CFG.battery.oled_i2c_addr)) {
             displayOk = true;
         } else {
             displayOk = false;
@@ -62,29 +64,32 @@ public:
 
     // Compute battery % from current voltage
     float computePercentage(float v) const {
-        float pct = (v - MIN_BATTERY_VOLTAGE) / (MAX_BATTERY_VOLTAGE - MIN_BATTERY_VOLTAGE) * 100.0f;
+        float pct = (v - CFG.battery.min_voltage) /
+                    (CFG.battery.max_voltage - CFG.battery.min_voltage) * 100.0f;
         if (pct < 0.0f) pct = 0.0f;
         if (pct > 100.0f) pct = 100.0f;
         return pct;
     }
 
-    // Public helpers for AndonManager
-    bool isLow(float thresholdPercent = 20.0f) const {
+    bool isLow(float thresholdPercent = NAN) const {
+        float thresh = isnan(thresholdPercent) ? CFG.battery.low_pct : thresholdPercent;
         float pct = isnan(lastPercentage) ? computePercentage(voltage) : lastPercentage;
-        return pct <= thresholdPercent;
+        return pct <= thresh;
     }
-    bool isCritical(float thresholdPercent = 10.0f) const {
+    bool isCritical(float thresholdPercent = NAN) const {
+        float thresh = isnan(thresholdPercent) ? CFG.battery.critical_pct : thresholdPercent;
         float pct = isnan(lastPercentage) ? computePercentage(voltage) : lastPercentage;
-        return pct <= thresholdPercent;
+        return pct <= thresh;
     }
     float getPercentage() const {
         return isnan(lastPercentage) ? computePercentage(voltage) : lastPercentage;
     }
 
+
     void readBatteryVoltage(void) {
-        int adcValue = analogRead(BATTERY_PIN);
-        float measuredVoltage = (adcValue * VREF / ADC_MAX);
-        float actualVoltage = measuredVoltage * (R1 + R2) / R2;
+        int adcValue = analogRead(BATTERY_PIN); // PIN can also be moved to config if needed
+        float measuredVoltage = (adcValue * CFG.battery.vref / CFG.battery.adc_max_counts);
+        float actualVoltage = measuredVoltage * (CFG.battery.r1_ohm + CFG.battery.r2_ohm) / CFG.battery.r2_ohm;
 
         voltageSamples[sampleIndex] = actualVoltage;
         sampleIndex = (sampleIndex + 1) % NUM_SAMPLES;
@@ -166,10 +171,40 @@ public:
                 if (displayOk) {
                     displayVoltage();
                 }
+                emitBatteryStatusIfNeeded();
                 state = READING;    
                 break;
             default: break;
         }
+    }
+
+
+    void emitBatteryStatusIfNeeded() {
+        const unsigned long now = millis();
+        const bool timeGate = (now - lastEmitMs) >= CFG.battery.emit_ms;
+        const float pct = isnan(lastPercentage) ? computePercentage(voltage) : lastPercentage;
+        const bool changeGate = isnan(lastEmittedPct) || fabs(pct - lastEmittedPct) >= CFG.battery.emit_pct_delta;
+
+        if (!(timeGate || changeGate)) return;
+
+        const float v = voltage;
+        const bool pass = (v >= CFG.battery.min_voltage && v <= CFG.battery.max_voltage);
+
+        StaticJsonDocument<192> doc;
+        doc["type"] = "test_result";
+        doc["id"] = "battery";
+        doc["category"] = "sensor";
+        doc["pass"] = pass;
+        doc["reason"] = pass ? "voltage_in_range" : "out_of_range";
+        auto m = doc.createNestedObject("measurements");
+        m["voltage_V"] = v;
+        m["pct"] = pct;
+
+        // Emit one line JSON to the Pi over USB serial
+        serializeJson(doc, Serial); Serial.println();
+
+        lastEmitMs = now;
+        lastEmittedPct = pct;
     }
 };
 
