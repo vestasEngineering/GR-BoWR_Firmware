@@ -20,7 +20,7 @@ struct ActuatorCfg {
 };
 
 struct AndonCfg {
-    uint8_t  neo_addr            = 0x60;
+    uint8_t  neo_addr            = 0x61;
     uint16_t num_leds            = 36;
     uint16_t frame_dt_ms         = 16;     // ~60 Hz
     uint16_t blink_interval_ms   = 500;

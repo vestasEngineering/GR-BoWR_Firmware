@@ -40,7 +40,7 @@ public:
 
     void setup(void) {
         analogReadResolution(10);
-        Wire.begin();
+        Wire1.begin();
 
         if (display.begin(SSD1306_SWITCHCAPVCC, CFG.battery.oled_i2c_addr)) {
             displayOk = true;

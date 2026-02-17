@@ -38,7 +38,8 @@ public:
     // Construct with placeholder length/pin; configure real values at setup()
     seesaw_NeoPixel strip = seesaw_NeoPixel(1 /*placeholder len*/,
                                             15 /*placeholder pin*/,
-                                            NEO_GRB + NEO_KHZ800);
+                                            NEO_GRB + NEO_KHZ800,
+                                            &Wire1);
 
     // Boot animation state
     bool booting = true;
@@ -67,7 +68,7 @@ public:
         Serial.println("{\"status\": \"AndonLight initialized successfully.\"}");
 
         // Default to YELLOW after boot finishes
-        setState(YELLOW);
+        //setState(YELLOW);
     }
 
     void loop() {

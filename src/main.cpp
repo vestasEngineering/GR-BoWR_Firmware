@@ -96,7 +96,7 @@ void setup() {
 
   delay(200);
   M7Timer.attachInterruptInterval(100, m7timer);
-  //andonLight.setup();
+  andonLight.setup();
   mySerial.setup();
   motors.setup();
   ultrasonic.setup();
@@ -127,7 +127,7 @@ void setup() {
 }
 
 void loop() {
-  //andonLight.loop();
+  andonLight.loop();
   mySerial.stateMachine();
   motors.stateMachine();
 
