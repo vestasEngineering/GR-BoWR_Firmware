@@ -1,6 +1,5 @@
 #include "BootHealth.hpp"
 
-// Now include implementations (TU only)
 #include "AndonLight.hpp"
 #include "Motors.hpp"
 #include "Actuator.hpp"
@@ -10,6 +9,8 @@
 #include <Version.hpp>
 #include <Arduino_CAN.h>
 #include <ArduinoJson.h>
+#include "EStop.hpp"
+#include "ClampSensor.hpp"
 
 namespace BootHealth {
 
@@ -101,12 +102,18 @@ static void checkBattery(BatteryMonitor* b, Report& r) {
   r.battery_ok = (pct > 10.0f);
 }
 
+static void checkClamp(const ClampSensor& c, Report& r) {
+  r.clamp_state = c.isClamped();
+  r.clamp_ok    = r.clamp_state;
+}
+
 Report run(AndonLight& light,
            Motors& motors,
            ActuatorControl& actuator,
            Ultrasonic& ultrasonic,
            UltrasonicServo& us_servo,
            BatteryMonitor* battery,
+           EStop& estop,
            uint32_t can_timeout_ms) {
   Report r;
   r.timeout_ms_used = can_timeout_ms;
@@ -129,6 +136,9 @@ Report run(AndonLight& light,
 
   // Battery (optional)
   checkBattery(battery, r);
+
+  // E-Stop state
+  r.estop_active = estop.isActive();
 
   // Overall OK only if all required subsystems pass
   // Battery optional: if you want battery to gate boot, include it in the AND
@@ -174,6 +184,8 @@ void sendReport(const Report& r) {
 
   checks["actuator"]["ok"] = r.actuator_ok;
 
+  checks["estop"]["active"] = r.estop_active;
+
   {
     JsonObject bat = checks.createNestedObject("battery");
     bat["ok"] = r.battery_ok;
@@ -198,4 +210,4 @@ void sendReport(const Report& r) {
   Serial.println();
 }
 
-} // namespace BootHealth
+}

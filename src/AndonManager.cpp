@@ -8,6 +8,8 @@
 #include "Ultrasonic.hpp"
 #include "UltrasonicServo.hpp"
 #include "Config.hpp"
+#include "EStop.hpp"
+#include "ClampSensor.hpp"
 
 static constexpr uint16_t kUltrasonicBadStreakThreshold = 20;
 static constexpr float    kUTServoTooCloseThreshold     = 60.0f;
@@ -19,6 +21,7 @@ const char* AndonManager::faultToKey(FaultCode f) {
     case FaultCode::UltrasonicPersistent:return "ultrasonic_bad";
     case FaultCode::UltrasonicServoFault:  return "ultrasonic_servo_fault";
     case FaultCode::ActuatorFault:       return "actuator_fault";
+    case FaultCode::ClampUnclamped:        return "clamp_unclamped";
     case FaultCode::Motor0Fault:         return "motor0_fault";
     case FaultCode::Motor1Fault:         return "motor1_fault";
     case FaultCode::Motor2Fault:         return "motor2_fault";
@@ -36,6 +39,7 @@ const char* AndonManager::faultToModuleId(FaultCode f) {
     case FaultCode::UltrasonicPersistent: return "ultrasonic";
     case FaultCode::UltrasonicServoFault:  return "ultrasonic_servo";
     case FaultCode::ActuatorFault:        return "actuator_1"; // or "actuator" if you prefer generic
+    case FaultCode::ClampUnclamped:       return "clamp"; 
     case FaultCode::Motor0Fault:          return "motor_1";
     case FaultCode::Motor1Fault:          return "motor_2";
     case FaultCode::Motor2Fault:          return "motor_3";
@@ -52,9 +56,11 @@ AndonManager::AndonManager(AndonLight& light,
                            BatteryMonitor& battery,
                            Ultrasonic& ultrasonic,
                            UltrasonicServo& ut_servo,
+                           EStop& estop,
+                           ClampSensor& clamp,
                            Config cfg)
 : light_(light), link_(link), motors_(motors), actuator_(actuator),
-  jog_(jog), battery_(battery), ultrasonic_(ultrasonic), ut_servo_(ut_servo), cfg_(cfg) {}
+  jog_(jog), battery_(battery), ultrasonic_(ultrasonic), ut_servo_(ut_servo), cfg_(cfg), estop_(estop), clamp_(clamp) {}
 
 
 void AndonManager::setup() {
@@ -99,7 +105,6 @@ void AndonManager::tick() {
     current_ = raw;
     light_.setState(current_);
 
-    // NEW: collect explicit faults for detailed diagnostics
     ::std::vector<FaultCode> faults;
     collectFaults(faults);
 
@@ -135,8 +140,7 @@ AndonLight::States AndonManager::compute(uint32_t /*now*/) {
 
 
 bool AndonManager::isEStop() const {
-  // Example: return actuator_.estopActive();
-  return false;
+  return estop_.isActive();
 }
 
 
@@ -148,6 +152,10 @@ bool AndonManager::hasFault() const {
 
 void AndonManager::collectFaults(std::vector<AndonManager::FaultCode>& out) const {
   out.clear();
+
+  if (!clamp_.isClamped()) {
+    out.push_back(FaultCode::ClampUnclamped);
+  }
 
   
   // --- Ultrasonic Servo jam check: verify only during first few seconds of ACTIVE ---

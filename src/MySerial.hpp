@@ -157,7 +157,7 @@ public:
         Serial.println();
     }
 
-    // ✅ Keep old overload for backward compatibility
+    // Old overload for backward compatibility
     void sendAndonDiagnostics(AndonLight::States state,
                               uint32_t ms,
                               bool overrideActive,
@@ -188,10 +188,6 @@ public:
 
     void setup() {
         state = LinkState::DISCONNECTED;
-
-        // Serial.begin() is already called in Main.cpp; don’t double-init if you can avoid it.
-        // If you need to guard:
-        // if (!Serial) Serial.begin(115200);
 
         pinMode(RED_LED, OUTPUT);
         digitalWrite(RED_LED, LOW);
@@ -235,14 +231,32 @@ public:
     }
 
     void receiveLinux(void) {
-        // LED pulse (see note about ISR decrement rate)
-        if (!receiveDelay) {
-            digitalWrite(RED_LED, HIGH);
-        }
-
-        recvWithStartEndMarkers();
-        processMessage();
+    if (!receiveDelay) digitalWrite(RED_LED, HIGH);
+    recvWithStartEndMarkers();   // keeps compatibility with <...>
+    if (!newData) recvLineJson(); // also accept plain JSON lines
+    processMessage();
     }
+
+
+
+    void recvLineJson() {
+    static size_t ndx = 0;
+    while (Serial.available() > 0 && !newData) {
+        char c = Serial.read();
+        timeout = CFG.serial.rx_keepalive_ms;
+        if (c == '\n' || c == '\r') {
+        if (ndx > 0) {
+            receivedChars[ndx] = '\0';
+            ndx = 0;
+            newData = true;
+            receiveDelay = CFG.serial.rx_led_flash_ms;
+        }
+        } else if (ndx < numChars - 1) {
+        receivedChars[ndx++] = c;
+        }
+    }
+    }
+
 
     void recvWithStartEndMarkers(void) {
         static bool  recvInProcess = false;
@@ -508,10 +522,10 @@ public:
         }
         else if (action.equalsIgnoreCase("test_motor")) {
             int index = jsonPacket["index"] | 0;
-            float speed = jsonPacket["speed"] | 0.02f;         // gentle
+            float speed = jsonPacket["speed"] | 0.02f;       
             unsigned long dur = jsonPacket["duration_ms"] | 600;
             const char* id = jsonPacket["id"] | "motor_0";
-            runTestMotor(id, index, speed, dur);
+           runTestMotor(id, index, speed, dur);
         }
         else if (action.equalsIgnoreCase("test_actuator")) {
             int channel = jsonPacket["channel"] | 0;
@@ -551,7 +565,7 @@ public:
             runTestUltrasonicServo(id);
         }
     }
-
+    
     void checkTriggers() {
         int currentPos = motors->requestAPOS();
         unsigned long now = millis();
@@ -590,7 +604,6 @@ public:
     }
     
     //HMI Test Section
-
     void runTestMotor(const char* id, int index, float speed, unsigned long durationMs) {
     int apos0 = motors->requestAPOS();  // uses your averaged encoder mm
     if (ultrasonic_) {
@@ -725,7 +738,7 @@ void runTestUltrasonicServo(const char* id) {
 
     // 1) Activate servo
     ultrasonicServo_->activate();
-    delay(1000); // was 500 - servo probably wasn’t done moving
+    delay(1000);
 
     // 2) Let ultrasonic update for ~1 second
     const unsigned long t_end = millis() + 1000;

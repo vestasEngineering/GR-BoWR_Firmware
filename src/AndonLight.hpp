@@ -68,7 +68,7 @@ public:
         Serial.println("{\"status\": \"AndonLight initialized successfully.\"}");
 
         // Default to YELLOW after boot finishes
-        //setState(YELLOW);
+        setState(YELLOW);
     }
 
     void loop() {

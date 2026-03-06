@@ -7,6 +7,7 @@ class ActuatorControl;
 class Ultrasonic;
 class UltrasonicServo;
 class BatteryMonitor;
+class EStop;
 
 namespace BootHealth {
 
@@ -15,10 +16,17 @@ struct Report {
 
   bool andon_ok = false;
 
+  bool estop_active = false;
+
   bool can_ok = false;
   uint8_t can_axes_mask = 0;   // bit i = axis i (0..3) responded
 
   bool motors_ok = false;
+
+  
+  bool clamp_ok = false;
+  bool clamp_state = false;
+
 
   bool ultrasonic_ok = false;
   int   ultrasonic_adc = -1;
@@ -44,6 +52,7 @@ Report run(AndonLight& light,
            Ultrasonic& ultrasonic,
            UltrasonicServo& us_servo,
            BatteryMonitor* battery /* optional */,
+           EStop& estop,
            uint32_t can_timeout_ms = 500);
 
 /// Serialize and send the report as a single JSON line over Serial.

@@ -59,6 +59,9 @@ public:
             voltage = (float(analogRead(CFG.ultrasonic.analog_pin)) * CFG.battery.vref / CFG.battery.adc_max_counts);
             measuredDistance = voltage * CFG.ultrasonic.mm_per_volt + CFG.ultrasonic.offset_mm;
 
+            //Serial.print("Distance: ");
+            //Serial.println(measuredDistance);
+
             const bool isBad40 = fabsf(measuredDistance - CFG.ultrasonic.bad40_center_mm) <= CFG.ultrasonic.bad40_tol_mm;
 
             if (!isValidMeasurement(measuredDistance)) {

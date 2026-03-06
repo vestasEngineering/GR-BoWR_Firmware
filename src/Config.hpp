@@ -53,11 +53,27 @@ struct BatteryCfg {
     int     oled_reset_pin      = -1;
     uint8_t oled_i2c_addr       = 0x3C;
 
-    uint16_t emit_ms            = 60000;
+    uint32_t emit_ms            = 100000;
     float    emit_pct_delta     = 1.0f;
 
     float    low_pct            = 20.0f;
     float    critical_pct       = 10.0f;
+};
+
+
+struct ClampCfg {
+    int       pin                 = D5;      // TLP785 output into Portenta H7
+    bool      active_high         = true;    // HIGH = clamped OK
+    uint16_t  debounce_ms         = 20;      // input debounce
+    uint32_t  emit_ms             = 1000;    // optional telemetry cadence (if you want to emit)
+};
+
+
+struct EStopCfg {
+    int      pin                = D0;
+    bool     active_high        = false;
+    uint8_t  pull_mode          = 2;      // 0=None, 1=Pullup, 2=Pulldown
+    bool     latch              = false;  // when true, ACTIVE latches until cleared in software
 };
 
 struct MotorsCfg {
@@ -105,9 +121,9 @@ struct UltrasonicCfg {
 };
 
 struct UltrasonicServoCfg {
-    int pwm_pin                 = D4;
-    int active_angle_deg        = 10;
-    int inactive_angle_deg      = 180;
+    int pwm_pin                 = D3;
+    int active_angle_deg        = 00;
+    int inactive_angle_deg      = 170;
 };
 
 struct SerialCfg {
@@ -123,11 +139,13 @@ struct RobotConfig {
     AndonCfg           andon;
     AndonManagerCfg    andonMgr;
     BatteryCfg         battery;
+    EStopCfg           estop;
     MotorsCfg          motors;
     JogCfg             jog;
     UltrasonicCfg      ultrasonic;
     UltrasonicServoCfg ut_servo;
     SerialCfg          serial;
+    ClampCfg           clamp;
 };
 
 extern RobotConfig CFG;

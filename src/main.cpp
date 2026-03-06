@@ -15,6 +15,9 @@
 #include <math.h>
 #include "Config.hpp"
 
+#include "EStop.hpp"
+EStop estop;
+
 #include <Motors.hpp>
 Motors motors;
 
@@ -31,6 +34,9 @@ ActuatorControl actuator;
 #include <AndonLight.hpp>
 AndonLight andonLight;
 
+#include "ClampSensor.hpp"
+ClampSensor clamp(CFG.clamp);
+
 #include <MySerial.hpp>
 MySerial mySerial(actuator, andonLight, motors);
 
@@ -41,7 +47,7 @@ BatteryMonitor batteryMonitor;
 JogControl jogControl(motors, mySerial);
 
 #include "AndonManager.hpp"
-AndonManager andonMgr(andonLight, mySerial, motors, actuator, jogControl, batteryMonitor, ultrasonic, ultrasonicServo);
+AndonManager andonMgr(andonLight, mySerial, motors, actuator, jogControl, batteryMonitor, ultrasonic, ultrasonicServo, estop, clamp);
 
 #include "BootHealth.hpp"
 
@@ -100,6 +106,7 @@ void setup() {
   mySerial.setup();
   motors.setup();
   ultrasonic.setup();
+  estop.setup();
   mySerial.attachAndonManager(andonMgr);
   mySerial.attachUltrasonic(ultrasonic, ultrasonicEnabled);
   mySerial.attachUltrasonicServo(ultrasonicServo);
@@ -108,6 +115,7 @@ void setup() {
   actuator.setup ();
   jogControl.setup();
   batteryMonitor.setup();
+  clamp.setup();
   andonMgr.setup();
 
   // --- Boot health check: probe subsystems and emit one JSON line to Raspberry Pi ---
@@ -117,7 +125,8 @@ void setup() {
       actuator,
       ultrasonic,
       ultrasonicServo,
-      /*battery=*/&batteryMonitor,
+      &batteryMonitor,
+      estop,
       /*can_timeout_ms=*/500
   );
   BootHealth::sendReport(rep);
@@ -130,12 +139,13 @@ void loop() {
   andonLight.loop();
   mySerial.stateMachine();
   motors.stateMachine();
-
+  estop.tick();
+  clamp.tick();
   // Poll CAN for incoming messages
   while (CAN.available()) {
     CanMsg msg = CAN.read();
     motors.handleCANResponse(msg);
-     //Serial.print("Received CAN ID: ");
+    //Serial.print("Received CAN ID: ");
     //Serial.println(msg.id, HEX);
     //Serial.print("Data: ");
     for (int i = 0; i < msg.data_length; i++) {

@@ -10,6 +10,8 @@ class JogControl;
 class BatteryMonitor;
 class Ultrasonic;
 class UltrasonicServo;
+class EStop;
+class ClampSensor;
 
 class AndonManager {
 public:
@@ -27,6 +29,7 @@ public:
     UltrasonicPersistent,
     UltrasonicServoFault,
     ActuatorFault,
+    ClampUnclamped,
     Motor0Fault, Motor1Fault, Motor2Fault, Motor3Fault
   };
 
@@ -41,6 +44,8 @@ public:
                BatteryMonitor& battery,
                Ultrasonic& ultrasonic,
                UltrasonicServo& ut_servo,
+               EStop& estop,
+               ClampSensor& clamp,
                Config cfg = kDefaultCfg);
 
   void setup();
@@ -78,6 +83,8 @@ private:
   Ultrasonic&        ultrasonic_;
   UltrasonicServo&   ut_servo_;
   Config             cfg_;
+  EStop&            estop_;
+  ClampSensor&      clamp_;
 
   uint32_t           last_tick_ms_{0};
   uint32_t           last_change_ms_{0};
