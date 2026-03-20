@@ -14,5 +14,6 @@
         "mstd_iterator": "cpp",
         "cmath": "cpp"
     },
-    "cmake.configureOnOpen": false
+    "cmake.configureOnOpen": false,
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }
