@@ -8,6 +8,10 @@
 
 class AndonLight {
 public:
+
+    Stream* io = nullptr;
+    AndonLight(Stream& ioRef) : io(&ioRef) {}
+
     enum States {
         GREEN,
         YELLOW,
@@ -48,11 +52,13 @@ public:
     uint16_t bootStep = 0;
 
     void setup() {
-        Serial.println("{\"status\": \"Initializing AndonLight...\"}");
+        io->println("{\"type\":\"status\",\"module\":\"andon\",\"msg\":\"initializing\"}");
+
 
         // Initialize seesaw NeoPixel driver at configured I2C address
         if (!strip.begin(CFG.andon.neo_addr)) {
-            Serial.println("{\"error\":\"seesaw_not_found\"}");
+            io->println("{\"type\":\"error\",\"module\":\"andon\",\"error\":\"seesaw_not_found\"}");
+
             while (1) delay(10);
         }
 
@@ -65,7 +71,8 @@ public:
 
         strip.show(); // clear
         startBootAnimation(); // boot animation starts immediately
-        Serial.println("{\"status\": \"AndonLight initialized successfully.\"}");
+        io->println("{\"type\":\"status\",\"module\":\"andon\",\"msg\":\"initializing\"}");
+
 
         // Default to YELLOW after boot finishes
         setState(YELLOW);

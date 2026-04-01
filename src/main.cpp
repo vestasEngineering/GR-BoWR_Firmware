@@ -2,10 +2,8 @@
 // TITLE BLOCK
 //====================================================
 /*  
- *  Project: GR-LRR
- *  Author: Jacob Owens - Vestas Blades America
- *  Date: 07/23/2024
- * 
+ *  Project: GR-ToWR Firmware
+ *  Description: Firmware for the Glue Robot - Top of Web Rover (GR-ToWR), running on an Arduino Portenta H7. 
  *  Author: Giovanni Cordova - CREADIS
  *  Date: 03/24/2025
  */
@@ -14,6 +12,8 @@
 #include <mbed.h>
 #include <math.h>
 #include "Config.hpp"
+
+UART myUART0(PA_0, PI_9, NC, NC);   // TX, RX, RTS, CTS
 
 #include "EStop.hpp"
 EStop estop;
@@ -24,24 +24,24 @@ Motors motors;
 #include <Ultrasonic.hpp>
 Ultrasonic ultrasonic;
 bool ultrasonicEnabled = false;
-
+  
 #include <UltrasonicServo.hpp>
 UltrasonicServo ultrasonicServo;
 
 #include <Actuator.hpp>
-ActuatorControl actuator;
+ActuatorControl actuator(myUART0);
 
 #include <AndonLight.hpp>
-AndonLight andonLight;
+AndonLight andonLight(myUART0);
 
 #include "ClampSensor.hpp"
 ClampSensor clamp(CFG.clamp);
 
 #include <MySerial.hpp>
-MySerial mySerial(actuator, andonLight, motors);
+MySerial mySerial(myUART0, actuator, andonLight, motors);
 
 #include <BatteryMonitor.hpp>
-BatteryMonitor batteryMonitor;
+BatteryMonitor batteryMonitor(myUART0);
 
 #include "JogControl.hpp"
 JogControl jogControl(motors, mySerial);
@@ -93,12 +93,17 @@ void loop(void);
 
 
 void setup() {
-  Serial.begin(115200);
-  while (!Serial) {
-    delay(10);
-  }
+  
+  //Serial.begin(115200);
+  //while (!Serial) {
+  //  delay(10);
+  //}
+  //Serial.println("{\"status\":\"boot\",\"msg\":\"USB debug Serial starting\"}");
 
-  Serial.println("{\"status\":\"boot\",\"msg\":\"Serial Starting\"}");
+  // Main Pi-facing UART
+  myUART0.begin(115200);
+  delay(1000);
+  myUART0.println("{\"type\":\"status\",\"status\":\"boot\",\"msg\":\"uart_starting\"}");
 
   delay(200);
   M7Timer.attachInterruptInterval(100, m7timer);
@@ -129,7 +134,7 @@ void setup() {
       estop,
       /*can_timeout_ms=*/500
   );
-  BootHealth::sendReport(rep);
+  BootHealth::sendReport(rep, myUART0);
 
   //If boot health fails, latch Andon to BLINK_RED (until manual override)
   //if (!rep.ok) andonMgr.setOverride(AndonLight::BLINK_RED);

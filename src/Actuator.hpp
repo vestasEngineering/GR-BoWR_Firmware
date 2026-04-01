@@ -15,6 +15,10 @@
 
 class ActuatorControl {
 public:
+
+    Stream* io = nullptr;
+    ActuatorControl(Stream& ioRef) : io(&ioRef) {}
+
     Adafruit_MCP4728 dac;
     Adafruit_ADS1115 adc;
     
@@ -64,16 +68,17 @@ public:
 
     void setup() {
         Wire.begin();
-        Serial.println("{\"status\": \"Initializing ActuatorControl...\"}");
+        io->println("{\"type\":\"status\",\"module\":\"actuator\",\"msg\":\"initializing\"}");
 
-        if (!dac.begin()) { pcbFault_ = true; Serial.println("{\"status\":\"MCP4728 init FAILED\",\"fault\":\"pcb\"}"); }
-        else              { Serial.println("{\"status\":\"MCP4728 init OK\"}"); }
+        if (!dac.begin()) { pcbFault_ = true; io->println("{\"type\":\"status\",\"module\":\"actuator\",\"status\":\"mcp4728_init_failed\",\"fault\":\"pcb\"}"); }
+        else              { io->println("{\"type\":\"status\",\"module\":\"actuator\",\"status\":\"mcp4728_init_ok\"}"); }
 
-        if (!adc.begin()) { pcbFault_ = true; Serial.println("{\"status\":\"ADS1115 init FAILED\",\"fault\":\"pcb\"}"); }
-        else              { Serial.println("{\"status\":\"ADS1115 init OK\"}"); }
+        if (!adc.begin()) { pcbFault_ = true; io->println("{\"type\":\"status\",\"module\":\"actuator\",\"status\":\"ads1115_init_failed\",\"fault\":\"pcb\"}"); }
+        else              { io->println("{\"type\":\"status\",\"module\":\"actuator\",\"status\":\"ads1115_init_ok\"}"); }
 
         state = SET_POSITION;
     }
+
 
     void writeDAC(uint8_t channel, float voltage) {
         const float v = constrain(voltage, 0.0f, CFG.actuator.maxCommandVoltage);
@@ -87,9 +92,11 @@ public:
             case 3: channelEnum = MCP4728_CHANNEL_D; break;
             default:
                 StaticJsonDocument<96> doc;
+                doc["type"] = "error";
+                doc["module"] = "actuator";
                 doc["error"] = "invalid_dac_channel";
                 doc["channel"] = channel;
-                serializeJson(doc, Serial); Serial.println();
+                serializeJson(doc, *io); io->println();
                 return;
         }
 
@@ -161,23 +168,30 @@ public:
     }
 
     void debugOutput() {
-        Serial.println("--------- Actuator Debug ---------");
         for (uint8_t i = 0; i < NUM_ACTUATORS; i++) {
-            Serial.print("Ch "); Serial.print(i);
-            Serial.print("  Cmd="); Serial.print(actuatorPositions[i], 3);
-            Serial.print("V  FB="); Serial.print(feedbackSignals[i], 3);
-            Serial.print("V  Jam="); Serial.print(jammed[i] ? "Y" : "N");
-            Serial.print("  LastErr="); Serial.print(lastErrV[i], 3);
-            Serial.println();
+            StaticJsonDocument<160> doc;
+            doc["type"] = "actuator_debug";
+            doc["channel"] = i;
+            doc["cmd_V"] = actuatorPositions[i];
+            doc["fb_V"] = feedbackSignals[i];
+            doc["jam"] = jammed[i];
+            doc["last_err_V"] = lastErrV[i];
+            serializeJson(doc, *io);
+            io->println();
         }
-        Serial.println("----------------------------------");
     }
 
-    void runSelfTest() {
-        Serial.println (">>> Starting self-test routine...");
-        for (uint8_t i = 0; i < NUM_ACTUATORS; i++) {
-            Serial.print("Testing actuator "); Serial.println(i);
 
+    void runSelfTest() {
+        {
+            StaticJsonDocument<96> doc;
+            doc["type"] = "actuator_self_test";
+            doc["phase"] = "start";
+            serializeJson(doc, *io);
+            io->println();
+        }
+
+        for (uint8_t i = 0; i < NUM_ACTUATORS; i++) {
             float testVoltage = 2.5f;
             actuatorPositions[i] = testVoltage;
             writeDAC(i, testVoltage);
@@ -185,14 +199,28 @@ public:
 
             float feedback = readADC(i % 4);
             feedbackSignals[i] = feedback;
-            Serial.print(" -> Set: "); Serial.print(testVoltage);
-            Serial.print(" V, Feedback: "); Serial.print(feedback); Serial.println(" V" );
+
+            StaticJsonDocument<160> doc;
+            doc["type"] = "actuator_self_test";
+            doc["phase"] = "sample";
+            doc["channel"] = i;
+            doc["command_V"] = testVoltage;
+            doc["feedback_V"] = feedback;
+            serializeJson(doc, *io);
+            io->println();
 
             actuatorPositions[i] = 0.0f;
             writeDAC(i, 0.0f);
             delay(250);
         }
-        Serial.println("<<< Self-test routine completed.");
+
+        {
+            StaticJsonDocument<96> doc;
+            doc["type"] = "actuator_self_test";
+            doc["phase"] = "complete";
+            serializeJson(doc, *io);
+            io->println();
+        }
     }
     
     // ---- Mapping-derived expected feedback for your measured system ----

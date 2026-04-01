@@ -11,6 +11,10 @@
 
 class Ultrasonic {
 public:
+
+    Stream* io = nullptr;
+    Ultrasonic(Stream& ioRef) : io(&ioRef) {}
+
     volatile int delay = 0;
     float distance[3] = {0.0, 0.0, 0.0}; // [n, n-1, n-2]
     float voltage = 0.0;
@@ -59,8 +63,8 @@ public:
             voltage = (float(analogRead(CFG.ultrasonic.analog_pin)) * CFG.battery.vref / CFG.battery.adc_max_counts);
             measuredDistance = voltage * CFG.ultrasonic.mm_per_volt + CFG.ultrasonic.offset_mm;
 
-            //Serial.print("Distance: ");
-            //Serial.println(measuredDistance);
+            //io->print("Distance: ");
+            //io->println(measuredDistance);
 
             const bool isBad40 = fabsf(measuredDistance - CFG.ultrasonic.bad40_center_mm) <= CFG.ultrasonic.bad40_tol_mm;
 

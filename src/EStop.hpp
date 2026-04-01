@@ -9,6 +9,10 @@
 
 class EStop {
 public:
+
+    Stream* io = nullptr;
+    EStop(Stream& ioRef) : io(&ioRef) {}
+
   struct Config {
     enum class Pull : uint8_t { None, Pullup, Pulldown };
 
@@ -60,12 +64,12 @@ public:
     }
 
 #ifdef ESTOP_DEBUG
-    Serial.print(F("{\"estop_dbg\":{"));
-    Serial.print(F("\"raw\":"));       Serial.print(raw ? "1" : "0");
-    Serial.print(F(",\"stable\":"));   Serial.print(stable_ ? "1" : "0");
-    Serial.print(F(",\"latched\":"));  Serial.print(latched_ ? "1" : "0");
-    Serial.print(F(",\"ms\":"));       Serial.print(millis());
-    Serial.println(F("}}"));
+    io->print(F("{\"estop_dbg\":{"));
+    io->print(F("\"raw\":"));       io->print(raw ? "1" : "0");
+    io->print(F(",\"stable\":"));   io->print(stable_ ? "1" : "0");
+    io->print(F(",\"latched\":"));  io->print(latched_ ? "1" : "0");
+    io->print(F(",\"ms\":"));       io->print(millis());
+    io->println(F("}}"));
 #endif
   }
 
@@ -98,17 +102,17 @@ public:
   /// Emit compact JSON status line to Serial (no ArduinoJson dependency).
   /// Example: {"type":"estop_status","active":true,"stable":true,"latched":true,"raw":true,"ms":12345}
   void emitStatusJson() const {
-    Serial.print(F("{\"type\":\"estop_status\",\"active\":"));
-    Serial.print(isActive() ? F("true") : F("false"));
-    Serial.print(F(",\"stable\":"));
-    Serial.print(stable_ ? F("true") : F("false"));
-    Serial.print(F(",\"latched\":"));
-    Serial.print(latched_ ? F("true") : F("false"));
-    Serial.print(F(",\"raw\":"));
-    Serial.print(rawActiveInstant() ? F("true") : F("false"));
-    Serial.print(F(",\"ms\":"));
-    Serial.print((unsigned long)millis());
-    Serial.println(F("}"));
+    io->print(F("{\"type\":\"estop_status\",\"active\":"));
+    io->print(isActive() ? F("true") : F("false"));
+    io->print(F(",\"stable\":"));
+    io->print(stable_ ? F("true") : F("false"));
+    io->print(F(",\"latched\":"));
+    io->print(latched_ ? F("true") : F("false"));
+    io->print(F(",\"raw\":"));
+    io->print(rawActiveInstant() ? F("true") : F("false"));
+    io->print(F(",\"ms\":"));
+    io->print((unsigned long)millis());
+    io->println(F("}"));
   }
 
   /// Access/modify config; reload from global CFG

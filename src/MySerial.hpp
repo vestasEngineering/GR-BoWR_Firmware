@@ -41,7 +41,7 @@ public:
         int threshold;
         int activate_channel;
         int deactivate_channel;
-        int delay_seconds;
+        float delay_seconds;
         bool triggered = false;
         unsigned long triggerTime = 0;
         bool waitingToDeactivate = false;
@@ -53,11 +53,13 @@ public:
     AndonLight* andonLight;
     Motors*     motors;
     ActuatorControl* actuator;
-    UltrasonicServo* ultrasonicServo_ = nullptr;
+    UltrasonicServo* ultrasonicServo_ = nullptr;    
+    Stream* io = nullptr;
 
     
-    MySerial(ActuatorControl& actuatorRef, AndonLight& lightRef, Motors& motorsRef)
-    : andonMgr(nullptr)
+    MySerial(Stream& ioRef, ActuatorControl& actuatorRef, AndonLight& lightRef, Motors& motorsRef)
+    : io(&ioRef)
+    , andonMgr(nullptr)
     , andonLight(&lightRef)
     , motors(&motorsRef)
     , actuator(&actuatorRef) {}
@@ -95,7 +97,7 @@ public:
         for (JsonPairConst kv : meas) {
             m[kv.key()] = kv.value();
         }
-        serializeJson(doc, Serial); Serial.println();
+        serializeJson(doc, *io); io->println();
     }
 
     // Helper: convert AndonLight::States to string for diagnostics
@@ -153,8 +155,7 @@ public:
             modulesArr.add(AndonManager::faultToModuleId(f));
         }
 
-        serializeJson(doc, Serial);
-        Serial.println();
+        serializeJson(doc, *io); io->println();
     }
 
     // Old overload for backward compatibility
@@ -192,7 +193,7 @@ public:
         pinMode(RED_LED, OUTPUT);
         digitalWrite(RED_LED, LOW);
 
-        Serial.println("{\"status\":\"serial_started\"}");
+        io->println("{\"status\":\"serial_started\"}");
     }
 
     void stateMachine(void) {
@@ -209,7 +210,7 @@ public:
             }
             if (!thisDelay) {
                 thisDelay = 500;
-                // Serial.println("connected");
+                // io->println("connected");
             }
             break;
 
@@ -221,7 +222,7 @@ public:
             }
             if (!thisDelay) {
                 thisDelay = 500;
-                // Serial.println("disconnected");
+                // io->println("disconnected");
             }
             break;
 
@@ -231,30 +232,55 @@ public:
     }
 
     void receiveLinux(void) {
-    if (!receiveDelay) digitalWrite(RED_LED, HIGH);
-    recvWithStartEndMarkers();   // keeps compatibility with <...>
-    if (!newData) recvLineJson(); // also accept plain JSON lines
-    processMessage();
-    }
+        if (!receiveDelay) digitalWrite(RED_LED, HIGH);
 
+        while (io->available() > 0) {
+            recvLineJson();
+            if (!newData) {
+                break;  
+            }
+            processMessage();
+        }
+    }
 
 
     void recvLineJson() {
-    static size_t ndx = 0;
-    while (Serial.available() > 0 && !newData) {
-        char c = Serial.read();
-        timeout = CFG.serial.rx_keepalive_ms;
-        if (c == '\n' || c == '\r') {
-        if (ndx > 0) {
-            receivedChars[ndx] = '\0';
-            ndx = 0;
-            newData = true;
-            receiveDelay = CFG.serial.rx_led_flash_ms;
+        static size_t ndx = 0;
+        static bool inFrame = false;
+        static bool overflow = false;
+
+        while (io->available() > 0 && !newData) {
+            char c = io->read();
+            timeout = CFG.serial.rx_keepalive_ms;
+
+            if (!inFrame) {
+                if (c == '{') {
+                    inFrame = true;
+                    ndx = 0;
+                    overflow = false;
+                    receivedChars[ndx++] = c;
+                }
+                continue;
+            }
+
+            if (c == '\n' || c == '\r') {
+                if (ndx > 0 && !overflow) {
+                    receivedChars[ndx] = '\0';
+                    newData = true;
+                    receiveDelay = CFG.serial.rx_led_flash_ms;
+                }
+                ndx = 0;
+                inFrame = false;
+                overflow = false;
+                return;
+            }
+
+            if (ndx < numChars - 1) {
+                receivedChars[ndx++] = c;
+            } else {
+                overflow = true;
+            }
         }
-        } else if (ndx < numChars - 1) {
-        receivedChars[ndx++] = c;
-        }
-    }
     }
 
 
@@ -265,8 +291,8 @@ public:
         const char endMarker   = '>';
         char rc;
 
-        while (Serial.available() > 0 && newData == false) {
-            rc = Serial.read();
+        while (io->available() > 0 && newData == false) {
+            rc = io->read();
             
             timeout = CFG.serial.rx_keepalive_ms;;
 
@@ -314,18 +340,22 @@ public:
     }
 
     void depackage(void) {
+        jsonPacket.clear();
         DeserializationError err = deserializeJson(jsonPacket, receivedChars);
 
         if (err) {
-            StaticJsonDocument<128> doc;
+            StaticJsonDocument<256> doc;
             doc["error"] = "json_parse";
             doc["code"]  = err.c_str();
-            serializeJson(doc, Serial); Serial.println();
+            doc["raw"]   = receivedChars;   // extremely useful
+            serializeJson(doc, *io);
+            io->println();
             return;
         }
 
         updateParameters();
     }
+
 
     // Helper: parse Andon state string → enum
     static bool parseAndonState(const String& s, AndonLight::States& out) {
@@ -368,7 +398,7 @@ public:
             response["status"]  = "OK";
             response["channel"] = channel;
             response["voltage"] = voltage;
-            serializeJson(response, Serial); Serial.println();
+            serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("read_feedback")) {
             int channel = jsonPacket["channel"] | -1;
@@ -378,7 +408,7 @@ public:
             StaticJsonDocument<128> response;
             response["channel"]  = channel;
             response["feedback"] = feedback;
-            serializeJson(response, Serial); Serial.println();
+            serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("reset_encoder")) {
             for (int axis = 0; axis < 4; axis++) {
@@ -386,20 +416,20 @@ public:
             }
             StaticJsonDocument<64> response;
             response["status"] = "All encoders reset";
-            serializeJson(response, Serial); Serial.println();
+            serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("STOP")) {
             motors->STOP();
         }
         else if (action.equalsIgnoreCase("set_light")) {
             if (!jsonPacket.containsKey("state")) {
-                Serial.println("{\"error\":\"Missing state for set_light\"}");
+                io->println("{\"error\":\"Missing state for set_light\"}");
                 return;
             }
             String stateStr = jsonPacket["state"];
             AndonLight::States newState;
             if (!parseAndonState(stateStr, newState)) {
-                Serial.println("{\"error\":\"Invalid light state\"}");
+                io->println("{\"error\":\"Invalid light state\"}");
                 return;
             }
 
@@ -414,26 +444,26 @@ public:
             StaticJsonDocument<64> response;
             response["status"] = "light_updated";
             response["state"]  = stateStr;
-            serializeJson(response, Serial); Serial.println();
+            serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("light_override")) {
             if (!jsonPacket.containsKey("state") || !andonMgr) {
-                Serial.println("{\"error\":\"Missing state/manager\"}");
+                io->println("{\"error\":\"Missing state/manager\"}");
                 return;
             }
             String s = jsonPacket["state"];
             AndonLight::States st;
             if (!parseAndonState(s, st)) {
-                Serial.println("{\"error\":\"Invalid light state\"}");
+                io->println("{\"error\":\"Invalid light state\"}");
                 return;
             }
             andonMgr->setOverride(st);
-            Serial.println("{\"status\":\"override_set\"}");
+            io->println("{\"status\":\"override_set\"}");
         }
         else if (action.equalsIgnoreCase("light_clear_override")) {
             if (andonMgr) {
                 andonMgr->clearOverride();
-                Serial.println("{\"status\":\"override_cleared\"}");
+                io->println("{\"status\":\"override_cleared\"}");
             }
         }
         else if (action.equalsIgnoreCase("set_triggers")) {
@@ -452,7 +482,7 @@ public:
                     trig.delay_seconds     = t["delay"];
                     triggerBuffer.push_back(trig);
                 } else {
-                    Serial.println("{\"error\":\"Invalid single trigger format\"}");
+                    io->println("{\"error\":\"Invalid single trigger format\"}");
                 }
             }
 
@@ -469,7 +499,7 @@ public:
                         trig.delay_seconds      = t["delay"];
                         triggerBuffer.push_back(trig);
                     } else {
-                        Serial.println("{\"error\":\"Invalid trigger format\"}");
+                        io->println("{\"error\":\"Invalid trigger format\"}");
                     }
                 }
             }
@@ -477,7 +507,7 @@ public:
             StaticJsonDocument<64> response;
             response["status"] = "triggers_loaded";
             response["count"]  = triggerBuffer.size();
-            serializeJson(response, Serial); Serial.println();
+            serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("start_process")) {
             if (ultrasonicEnabled_) *ultrasonicEnabled_ = true;
@@ -488,7 +518,7 @@ public:
 
             StaticJsonDocument<64> response;
             response["status"] = "process_started";
-            serializeJson(response, Serial); Serial.println();
+            serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("stop_process")) {
             if (ultrasonicEnabled_) *ultrasonicEnabled_ = false;
@@ -496,7 +526,7 @@ public:
 
             StaticJsonDocument<64> response;
             response["status"] = "process_stopped";
-            serializeJson(response, Serial); Serial.println();
+            serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("set_speed")) {
             float speed = jsonPacket["speed"] | 0.0f;
@@ -508,7 +538,7 @@ public:
             StaticJsonDocument<64> response;
             response["status"] = "speed_set";
             response["speed"]  = speed;
-            serializeJson(response, Serial); Serial.println();
+            serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("shutdown")) {
             motors->STOP();
@@ -518,7 +548,7 @@ public:
 
             StaticJsonDocument<64> response;
             response["status"] = "shutdown_complete";
-            serializeJson(response, Serial); Serial.println();
+            serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("test_motor")) {
             int index = jsonPacket["index"] | 0;
@@ -553,7 +583,7 @@ public:
                 err["id"] = id;
                 err["pass"] = false;
                 err["reason"] = "unknown_sensor";
-                serializeJson(err, Serial); Serial.println();
+                serializeJson(err, *io); io->println();
             }
         }
         else if (action.equalsIgnoreCase("test_light")) {
@@ -563,6 +593,13 @@ public:
         else if (action.equalsIgnoreCase("test_servo")) {
             const char* id = jsonPacket["id"] | "ultrasonic_servo";
             runTestUltrasonicServo(id);
+        }
+        else if (action.equalsIgnoreCase("ping")) {
+            StaticJsonDocument<128> response;
+            response["status"] = "pong";
+            response["uptime_ms"] = millis();
+            serializeJson(response, *io);
+            io->println();
         }
     }
     
@@ -583,8 +620,8 @@ public:
                 response["trigger_reached"] = true;
                 response["channel"]         = trig.activate_channel;
                 response["value"]           = trig.threshold;
-                serializeJson(response, Serial);
-                Serial.println();
+                serializeJson(response, *io);
+                io->println();
             }
 
             // Deactivation after delay
@@ -597,8 +634,8 @@ public:
                 StaticJsonDocument<128> response;
                 response["trigger_deactivated"] = true;
                 response["channel"]             = trig.deactivate_channel;
-                serializeJson(response, Serial);
-                Serial.println();
+                serializeJson(response, *io);
+                io->println();
             }
         }
     }

@@ -56,6 +56,6 @@ Report run(AndonLight& light,
            uint32_t can_timeout_ms = 500);
 
 /// Serialize and send the report as a single JSON line over Serial.
-void sendReport(const Report& r);
+void sendReport(const Report& r, Stream& out);
 
 }

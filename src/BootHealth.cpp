@@ -153,7 +153,7 @@ Report run(AndonLight& light,
   return r;
 }
 
-void sendReport(const Report& r) {
+void sendReport(const Report& r, Stream& out) {
   StaticJsonDocument<640> doc;
   doc["type"]  = "boot_health";
   doc["ts_ms"] = millis();
@@ -206,8 +206,8 @@ void sendReport(const Report& r) {
   }
 
 
-  serializeJson(doc, Serial);
-  Serial.println();
+  serializeJson(doc, out);
+  out.println();
 }
 
 }

@@ -21,6 +21,10 @@ extern Adafruit_SSD1306 display;
 
 class BatteryMonitor {
 public:
+
+    Stream* io = nullptr;
+    BatteryMonitor(Stream& ioRef) : io(&ioRef) {}
+
     float voltage = 0.0;
     float lastPercentage = NAN;
     bool  displayOk = false;
@@ -46,7 +50,7 @@ public:
             displayOk = true;
         } else {
             displayOk = false;
-            Serial.println(F("{\"battery\":\"oled_not_found_running_headless\"}"));
+            io->println(F("{\"type\":\"status\",\"module\":\"battery\",\"msg\":\"oled_not_found_running_headless\"}"));
         }
 
         if (displayOk) {
@@ -201,7 +205,7 @@ public:
         m["pct"] = pct;
 
         // Emit one line JSON to the Pi over USB serial
-        serializeJson(doc, Serial); Serial.println();
+        serializeJson(doc, *io); io->println();
 
         lastEmitMs = now;
         lastEmittedPct = pct;
