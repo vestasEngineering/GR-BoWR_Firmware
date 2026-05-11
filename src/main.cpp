@@ -14,12 +14,14 @@
 #include "Config.hpp"
 
 UART myUART0(PA_0, PI_9, NC, NC);   // TX, RX, RTS, CTS
+UART roboclaw_uart_a(PA_9, PA_10, NC, NC);
+UART roboclaw_uart_b(PJ_8, PJ_9, NC, NC);
 
 #include "EStop.hpp"
 EStop estop;
 
 #include <Motors.hpp>
-Motors motors;
+Motors motors(&roboclaw_uart_a, &roboclaw_uart_b);
 
 #include <Ultrasonic.hpp>
 Ultrasonic ultrasonic;
@@ -51,6 +53,8 @@ AndonManager andonMgr(andonLight, mySerial, motors, actuator, jogControl, batter
 
 #include "BootHealth.hpp"
 
+#include "stm32h7xx_hal_rcc.h"
+
 #include "Portenta_H7_TimerInterrupt.h"
 volatile int interruptCounter = 0;
 void m7timer() { 
@@ -61,7 +65,6 @@ void m7timer() {
 
   // every 10/10,000 second - 1,000hz - 0.001 second
   if ((interruptCounter % 10) == 0) { 
-      if(motors.thisDelay) motors.thisDelay--;
       if(mySerial.thisDelay) mySerial.thisDelay--;
       if(mySerial.timeout) mySerial.timeout--;
       if (mySerial.receiveDelay) mySerial.receiveDelay--;
@@ -71,6 +74,8 @@ void m7timer() {
   // every 100/10,000 second - 100hz - 0.01 second
   if ((interruptCounter % 100) == 0) { 
     if(ultrasonic.delay) ultrasonic.delay--;
+    if (ultrasonic.servoSettleDelay) ultrasonic.servoSettleDelay--;
+
     //if(encoder.thisDelay) encoder.thisDelay--;
   }
 
@@ -87,13 +92,66 @@ void m7timer() {
 }
 Portenta_H7_Timer M7Timer(TIM7);
 
+namespace ColdBootReset {
+
+  // Start with 2 seconds; increase to 3 s if needed.
+  static constexpr uint32_t kAutoResetDelayMs = 2000;
+
+  inline bool isColdPowerBoot()
+  {
+    const bool por = (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST) != RESET);
+    const bool bor = (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST) != RESET);
+    const bool sft = (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST) != RESET);
+
+    // Cold boot if power-related reset is present, but not software reset.
+    return (por || bor) && !sft;
+  }
+
+  inline void clearResetFlags()
+  {
+    __HAL_RCC_CLEAR_RESET_FLAGS();
+    __DSB();
+    __ISB();
+  }
+
+  [[noreturn]] inline void doSoftwareReset()
+  {
+    __disable_irq();
+    NVIC_SystemReset();
+    while (true) { }
+  }
+
+} // namespace ColdBootReset
+
 
 void setup(void);
 void loop(void);
 
 
 void setup() {
-  
+
+  // --- One-time delayed self-reset on cold power boot ---
+  {
+    const bool coldBoot = ColdBootReset::isColdPowerBoot();
+
+    // Clear flags now so the next reset is classified cleanly.
+    ColdBootReset::clearResetFlags();
+
+    if (coldBoot) {
+      // Optional: bring up the Pi-facing UART just enough to leave breadcrumbs.
+      myUART0.begin(115200);
+      delay(50);
+      myUART0.println("{\"type\":\"status\",\"status\":\"boot\",\"msg\":\"cold_boot_detected_autoreset_pending\"}");
+
+      delay(ColdBootReset::kAutoResetDelayMs);
+
+      myUART0.println("{\"type\":\"status\",\"status\":\"boot\",\"msg\":\"autoreset_now\"}");
+      delay(20);
+
+      ColdBootReset::doSoftwareReset();
+    }
+  }
+
   //Serial.begin(115200);
   //while (!Serial) {
   //  delay(10);
@@ -102,15 +160,14 @@ void setup() {
 
   // Main Pi-facing UART
   myUART0.begin(115200);
-  delay(1000);
+  delay(3000);
   myUART0.println("{\"type\":\"status\",\"status\":\"boot\",\"msg\":\"uart_starting\"}");
 
   delay(200);
-  M7Timer.attachInterruptInterval(100, m7timer);
-  andonLight.setup();
   mySerial.setup();
-  motors.setup();
+  motors.begin();
   ultrasonic.setup();
+  ultrasonicServo.attachUltrasonic(ultrasonic);
   estop.setup();
   mySerial.attachAndonManager(andonMgr);
   mySerial.attachUltrasonic(ultrasonic, ultrasonicEnabled);
@@ -119,10 +176,13 @@ void setup() {
   ultrasonicServo.setup();
   actuator.setup ();
   jogControl.setup();
+  mySerial.attachJogControl(jogControl);
   batteryMonitor.setup();
   clamp.setup();
+  andonLight.setup();
   andonMgr.setup();
 
+  
   // --- Boot health check: probe subsystems and emit one JSON line to Raspberry Pi ---
   BootHealth::Report rep = BootHealth::run(
       andonLight,
@@ -138,50 +198,34 @@ void setup() {
 
   //If boot health fails, latch Andon to BLINK_RED (until manual override)
   //if (!rep.ok) andonMgr.setOverride(AndonLight::BLINK_RED);
+  M7Timer.attachInterruptInterval(100, m7timer);
 }
 
 void loop() {
-  andonLight.loop();
-  mySerial.stateMachine();
-  motors.stateMachine();
-  estop.tick();
-  clamp.tick();
-  // Poll CAN for incoming messages
-  while (CAN.available()) {
-    CanMsg msg = CAN.read();
-    motors.handleCANResponse(msg);
-    //Serial.print("Received CAN ID: ");
-    //Serial.println(msg.id, HEX);
-    //Serial.print("Data: ");
-    for (int i = 0; i < msg.data_length; i++) {
-      //Serial.print(msg.data[i], HEX);
-      //Serial.print(" ");
-    }
-    //Serial.println();
+  
+  if (andonLight.booting) {
+    andonLight.loop();
+    return;
   }
 
-  static unsigned long lastPrint = 0;
-  if (millis() - lastPrint > 500) { // every 0.5s
-      lastPrint = millis();
-      //Serial.println("Encoder Positions (rev):");
-      for (int i = 0; i < 4; i++) {
-          //Serial.print("Axis ");
-          //Serial.print(i + 1);
-          //Serial.print(": ");
-          //Serial.println(motors.positions[i], 4); // 4 decimal places
-      }
-      //Serial.println("----------------------");
-  }
+  andonLight.loop();
+  mySerial.stateMachine();
+  jogControl.update();
+  motors.update();
+  estop.tick();
+  clamp.tick();
 
   if (ultrasonicEnabled) {
       ultrasonicServo.activate();  // Servo active when ultrasonic is enabled
       ultrasonic.stateMachine();
+      //myUART0.print("Ultrasonic distance: ");
+      //myUART0.println(ultrasonic.measuredDistance);
   } else {
       ultrasonicServo.deactivate(); // Servo inactive when ultrasonic is disabled
-  }
+      ultrasonic.servoSettleDelay = 0;
+  };
 
   actuator.stateMachine();
-  jogControl.update();
   batteryMonitor.stateMachine();
   andonMgr.tick();
 }

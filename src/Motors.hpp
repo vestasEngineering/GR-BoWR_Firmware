@@ -1,240 +1,126 @@
-#ifndef MY_MOTOR_CLASS
-#define MY_MOTOR_CLASS
+#ifndef MOTORS_HPP
+#define MOTORS_HPP
 
 #include <Arduino.h>
-#include <Arduino_CAN.h>
-#include <ArduinoJson.h>
-#include "Config.hpp"
+#include <Basicmicro.h>
+
+extern UART roboclaw_uart_a;
+extern UART roboclaw_uart_b;
 
 class Motors {
 public:
-    volatile int thisDelay = 0;
-    int index = 0;
-    float erefs = 0.0;
-    const float wheelDiameter = 0.048;
-    const int ENCODER_CPR = 4096; // Adjust based on your encoder resolution
-    uint32_t lastAposMs = 0;  // throttle APOS to 50 Hz
-    bool queryAllAxes = false; // set true if you want all 4 axes later
+    // ------------------------------------------------------------
+    // RoboClaw configuration
+    // ------------------------------------------------------------
+    static constexpr uint8_t  ADDR_A = 0x80;
+    static constexpr uint8_t  ADDR_B = 0x80;
+    static constexpr uint32_t BAUD   = 38400;
 
-    uint8_t EREFS_HEXDATA[4];
-
-    uint32_t const M1_EREFS_ID = 0x048020A8;
-    uint32_t const M2_EREFS_ID = 0x048040A8;
-    uint32_t const M3_EREFS_ID = 0x048060A8;
-    uint32_t const M4_EREFS_ID = 0x048080A8;
-    uint32_t const MD_EREFS_ID = 0x049FE0A8; // default ID
-
-    uint32_t const MOTOR_EREFS_IDS[4] = {M1_EREFS_ID, M2_EREFS_ID, M3_EREFS_ID, M4_EREFS_ID};
-
-    // APOS query CAN IDs
-    const uint32_t MOTOR_APOS_IDS[4] = {
-        0x16002005, 0x16004005, 0x16006005, 0x16008005
-    };
-
-    float speeds[4] = {0.0, 0.0, 0.0, 0.0};
-    float positions[4] = {0.0, 0.0, 0.0, 0.0}; // Encoder positions in revolutions
-    int receipts[4] = {0, 0, 0, 0};
-
-    enum States { WAITING, WRITING };
-    States state = WAITING;
-
-    void setup() {
-        if (!CAN.begin(CanBitRate::BR_250k)) {
-            Serial.println("{\"error\":\"can_init_failed\"}");
-            while (true) {
-                //Serial.println("CAN ISSUE");
-                delay(1000);
-            }
-        }
-
-        for (int i = 0; i < 4; i++) {
-            resetAPOS(i);
-        }
-    }
-
-    void erefs_to_hexdata(float input_float, uint8_t hexdata[4])
-    {
-        uint32_t initialInt = int(round(input_float * 16 * 16 * 16 * 16));
-        // Split the number into bytes
-        hexdata[3] = (initialInt >> 24) & 0xFF; // Most significant byte
-        hexdata[2] = (initialInt >> 16) & 0xFF;
-        hexdata[1] = (initialInt >> 8) & 0xFF;
-        hexdata[0] = initialInt & 0xFF; // Least significant byte
-    }
-
-    float ms_to_erefs(float ms, float wheelDiameter)
-    {
-        // meters per second linear speed to erefs
-        // wheel diameter in meters 0.048
-        float angularVelocity = ms / wheelDiameter;  // 0.1 m/s /m = 1/s
-        float rpm = angularVelocity / 0.10471975057; // convert from rads/s to rpm
-        // std::cout<<"EREFS: " << rpm * 18.7187185 << "\n";
-        return rpm * CFG.motors.erefs_k; // this was pulled from the eletrocraft setup file
-    }
-
-    // Stop all motors
-    void STOP() {
-        for (int i = 0; i < 4; i++) {
-            speeds[i] = 0.0;
-            float erefs = ms_to_erefs(0.0, wheelDiameter);
-            uint8_t hexdata[4];
-            erefs_to_hexdata(erefs, hexdata);
-            CanMsg stopCmd(CanExtendedId(MOTOR_EREFS_IDS[i]), sizeof(hexdata), hexdata);
-            CAN.write(stopCmd);
-        }
-        StaticJsonDocument<96> doc;
-        doc["motors"] = "stop_all";
-        serializeJson(doc, Serial); Serial.println();
-
-    }
+    // Motor command update rate.
+    uint16_t commandHz = 200;
 
 
-    // Send APOS query for motors 3 & 4 and return their average position
-    float requestAPOS() {
-        // Send APOS query only to motors 3 & 4 (axes 2 and 3)
-        for (uint8_t axis = 2; axis <= 3; axis++) {
-            uint8_t aposCmd[4] = {0x11, 0x00, 0x28, 0x02}; // MPL query for APOS
-            CanMsg query(CanExtendedId(MOTOR_APOS_IDS[axis]), sizeof(aposCmd), aposCmd);
-            CAN.write(query);
-        }
+    static constexpr float   WHEEL_DIAMETER_M = 0.048f;
+    static constexpr int32_t ENCODER_CPR      = 4096;
 
-        // Average encoder counts
-        float avgCounts = (positions[2] + positions[3]) * 0.5f;
+    // Any commanded speed with magnitude below this threshold is treated as zero.
+    // 0.0002 m/s = 0.2 mm/s.
+    static constexpr float ZERO_SPEED_THRESHOLD_MS = 0.0002f;
 
-        // Convert to mm using conversion factor factor
-        const float ENCODER_TO_MM = 310.0f / 280.0f; // ≈ 1.1071
-        return avgCounts * ENCODER_TO_MM;
-    }
+    // Safe motor command limits.
+    int32_t maxCommandQpps = 10000;
+    static constexpr uint32_t ACCEL_QPPS_S = 15000;
 
-    // Send APOS query at most 50 Hz (every 20 ms). Default: axes 2 and 3. Reduced CAN load.
-    void requestAPOSThrottled() {
-        static uint32_t lastAposMs = 0;
-        const uint32_t now = millis();
-        const uint16_t periodMs = max<uint16_t>(1, 1000 / CFG.motors.apos_hz);
-        if ((int32_t)(now - lastAposMs) < periodMs) return;
-        lastAposMs = now;
+    static constexpr float DISTANCE_MM_PER_COUNT = 0.0245793145f;
 
-        if (CFG.motors.apos_query_all) {
-            for (uint8_t axis = 0; axis < 4; ++axis) {
-                uint8_t aposCmd[4] = {0x11, 0x00, 0x28, 0x02};
-                CanMsg query(CanExtendedId(CFG.motors.apos_ids[axis]), sizeof(aposCmd), aposCmd);
-                CAN.write(query);
-            }
-        } else {
-            for (uint8_t axis = 2; axis <= 3; ++axis) {
-                uint8_t aposCmd[4] = {0x11, 0x00, 0x28, 0x02};
-                CanMsg query(CanExtendedId(CFG.motors.apos_ids[axis]), sizeof(aposCmd), aposCmd);
-                CAN.write(query);
-            }
-        }
-    }
+    static const int8_t AXIS_SIGN[4];
+
+    float   speeds[4]    = {0, 0, 0, 0};
+    int32_t encCounts[4] = {0, 0, 0, 0};
+    int32_t qpps[4]      = {0, 0, 0, 0};
+
+    // Encoder/speed polling rate.
+    uint16_t pollHz = 50;
+
+    // ------------------------------------------------------------
+    // Construction
+    // ------------------------------------------------------------
+    Motors();
+    Motors(UART* ua, UART* ub);
+
+    // ------------------------------------------------------------
+    // Lifecycle / loop
+    // ------------------------------------------------------------
+    void begin();
+    void update();
+
+    // ------------------------------------------------------------
+    // Motor control
+    // ------------------------------------------------------------
+    void setSpeeds(float s0, float s1, float s2, float s3);
+    void STOP();
+
+    // ------------------------------------------------------------
+    // Encoder maintenance / polling
+    // ------------------------------------------------------------
+    void resetEncoders();
+    void pollEncoders();
+
+    // ------------------------------------------------------------
+    // Calibrated distance helpers
+    // ------------------------------------------------------------
 
 
-    void resetAPOS(uint8_t axis) {
-        if (axis >= 4) {
-            StaticJsonDocument<64> err;
-            err["error"] = "reset_invalid_axis";
-            err["axis"]  = axis;
-            serializeJson(err, Serial); Serial.println();
-            return;
-        }
+    int32_t getNormalizedCounts(uint8_t axis) const;
 
-        const uint32_t RESET_APOS_IDS[4] = { 0x00802002, 0x00804002, 0x00806002, 0x00808002 };
-        uint8_t resetData[4] = {0x00, 0x00, 0x00, 0x00};
-        CanMsg resetCmd(CanExtendedId(RESET_APOS_IDS[axis]), sizeof(resetData), resetData);
+    // Returns calibrated wheel travel in millimeters for one axis.
+    float getWheelMM(uint8_t axis) const;
 
-        bool ok = CAN.write(resetCmd);
+    // Returns calibrated rear robot travel/radius in millimeters.
+    float getRobotRearDistanceMM() const;
 
-        StaticJsonDocument<160> doc;
-        doc["type"]  = "encoder_reset";
-        doc["axis"]  = axis + 1;
-        doc["ok"]    = ok;
-        doc["id"]    = RESET_APOS_IDS[axis]; // decimal is fine for JSON
-        // Optional hex string:
-        char hexbuf[12];
-        snprintf(hexbuf, sizeof(hexbuf), "0x%08lX", (unsigned long)RESET_APOS_IDS[axis]);
-        doc["id_hex"] = hexbuf;
+    // Returns calibrated rear robot travel/radius in meters.
+    float getRobotRearDistanceM() const;
 
-        serializeJson(doc, Serial); Serial.println();
-    }
+    // Converts calibrated millimeters to normalized encoder counts.
+    int32_t mm_to_distance_counts(float mm) const;
 
-    // Handle CAN responses (APOS)
-    void handleCANResponse(const CanMsg &msg) {
-        // Detect APOS response by MPL signature (bytes 2 and 3 = 0x28 0x02)
-        if (msg.data_length >= 8 && msg.data[2] == 0x28 && msg.data[3] == 0x02) {
-            uint8_t axisIndex = (msg.data[0] / 0x10) - 1; // 0x10, 0x20, 0x30, 0x40
-            if (axisIndex < 4) {
-                int32_t rawPos = (int32_t)(
-                    ((uint32_t)msg.data[4]) |
-                    ((uint32_t)msg.data[5] << 8) |
-                    ((uint32_t)msg.data[6] << 16) |
-                    ((uint32_t)msg.data[7] << 24)
-                );
-                positions[axisIndex] = (float)rawPos / ENCODER_CPR;
+    // Physically writes RoboClaw encoder counters so the current robot
+    void setRobotRearDistanceMM(float mm);
 
-                //Serial.print("[APOS] Axis ");
-                //Serial.print(axisIndex + 1);
-                //Serial.print(" position updated: raw=");
-                //Serial.print(rawPos);
-                //Serial.print(", rev=");
-                //Serial.println(positions[axisIndex], 4);
-            } else {
-                //Serial.println("[APOS] Invalid axis index in response!");
-            }
-        } else {
-            //Serial.print("[CAN] Unexpected message ID: 0x");
-            //Serial.println(msg.id, HEX);
-        }
+    // Same as above, but input is meters.
+    void setRobotRearDistanceM(float meters);
 
-        // Debug: print full CAN frame
-        //Serial.print("[CAN] Data: ");
-        //for (int i = 0; i < msg.data_length; i++) {
-            //Serial.print(msg.data[i], HEX);
-            //Serial.print(" ");
-        //}
-        //Serial.println();
-    }
+private:
+    // ------------------------------------------------------------
+    // RoboClaw instances
+    // ------------------------------------------------------------
+    Basicmicro rcA;
+    Basicmicro rcB;
 
-    // State machine for motor control and APOS requests
-    void stateMachine() {
-        switch (state) {
-            case WAITING:
-                if (!thisDelay) {
-                    thisDelay = 10;
-                    state = WRITING;
-                }
-                break;
+    // ------------------------------------------------------------
+    // Timing
+    // ------------------------------------------------------------
+    uint32_t lastPollMs = 0;
+    uint32_t lastSendMs = 0;
 
-            case WRITING:
-                if (!thisDelay)
-                {
+    // ------------------------------------------------------------
+    // Internal status/debug bookkeeping
+    // ------------------------------------------------------------
+    uint8_t encStatus_[4]   = {0, 0, 0, 0};
+    uint8_t speedStatus_[4] = {0, 0, 0, 0};
 
-                    thisDelay = 10;
-                    erefs = ms_to_erefs(speeds[index], wheelDiameter);                                                   // convert to erefs
-                    erefs_to_hexdata(erefs, EREFS_HEXDATA);                                                              // convert to hexdata
-                    CanMsg MOTOR_SET_EREFS(CanExtendedId(MOTOR_EREFS_IDS[index]), sizeof(EREFS_HEXDATA), EREFS_HEXDATA); // to can message
-                    //Serial.println(MOTOR_SET_EREFS);
-                    receipts[index] = CAN.write(MOTOR_SET_EREFS);
-                    index++; // 0 , 1 , 2 , 3
-                    
-                    if (index == 4) {
-                        index = 0;
-                        requestAPOSThrottled();
-                        //Serial.println(requestAPOSThrottled());
-                        thisDelay = 10;
-                        state = WAITING;
-                    }
+    bool encValid_[4]   = {false, false, false, false};
+    bool speedValid_[4] = {false, false, false, false};
 
-                    if (index == 4)
-                    {
-                        index = 0;
-                        thisDelay = 10;
-                        state = WAITING;
-                    }
-                }
-                break;
-        }
-    }
+    // ------------------------------------------------------------
+    // Internal helpers
+    // ------------------------------------------------------------
+    static uint32_t u32bits(int32_t v);
+
+    int32_t ms_to_qpps(float ms) const;
+
+    void sendSpeeds();
 };
 
 #endif

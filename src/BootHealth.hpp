@@ -8,44 +8,52 @@ class Ultrasonic;
 class UltrasonicServo;
 class BatteryMonitor;
 class EStop;
+class ClampSensor;
 
 namespace BootHealth {
 
 struct Report {
   bool ok = false;
 
+  // Subsystem health flags
   bool andon_ok = false;
-
   bool estop_active = false;
 
-  bool can_ok = false;
-  uint8_t can_axes_mask = 0;   // bit i = axis i (0..3) responded
+  bool encoders_ok = false;
+  uint8_t encoders_present_mask = 0;
 
+  // Motor system health (encoder-driven)
   bool motors_ok = false;
 
-  
+  // Clamp sensor
   bool clamp_ok = false;
   bool clamp_state = false;
 
-
+  // Ultrasonic
   bool ultrasonic_ok = false;
   int   ultrasonic_adc = -1;
   float ultrasonic_voltage = NAN;
   float ultrasonic_distance = NAN;
 
+  // Ultrasonic servo
   bool ultrasonic_servo_ok = false;
 
+  // Actuator board/motion checks
   bool actuator_ok = false;
 
+  // Battery system
   bool battery_ok = false;
   float battery_voltage = NAN;
   float battery_pct = NAN;
 
-  uint32_t timeout_ms_used = 0;   // CAN probe timeout used
+  // The probe timeout used for encoder liveness checks
+  uint32_t timeout_ms_used = 0;
 };
 
-/// Run all health checks. `battery` may be nullptr if not used.
-/// Returns a filled Report.
+
+bool probeEncoders(Motors& motors, uint32_t timeoutMs, uint8_t& goodCount);
+
+
 Report run(AndonLight& light,
            Motors& motors,
            ActuatorControl& actuator,
@@ -53,9 +61,9 @@ Report run(AndonLight& light,
            UltrasonicServo& us_servo,
            BatteryMonitor* battery /* optional */,
            EStop& estop,
-           uint32_t can_timeout_ms = 500);
+           uint32_t timeout_ms = 500);
 
-/// Serialize and send the report as a single JSON line over Serial.
+
 void sendReport(const Report& r, Stream& out);
 
-}
+} 

@@ -4,7 +4,6 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <vector>
-
 #include "Config.hpp"
 #include "AndonLight.hpp"
 #include "Motors.hpp"
@@ -13,6 +12,7 @@
 #include "Actuator.hpp"
 #include "BatteryMonitor.hpp"
 #include "UltrasonicServo.hpp"
+#include "JogControl.hpp"
 
 class AndonManager;
 class Ultrasonic;
@@ -37,6 +37,9 @@ public:
     bool serialEnded   = false;
     bool LED_STATE     = false; // optional latch if you want a heartbeat LED
 
+    unsigned long lastEncoderEmitMs = 0;
+    static constexpr unsigned long encoderEmitPeriodMs = 500;
+
     struct Trigger {
         int threshold;
         int activate_channel;
@@ -55,6 +58,7 @@ public:
     ActuatorControl* actuator;
     UltrasonicServo* ultrasonicServo_ = nullptr;    
     Stream* io = nullptr;
+    JogControl* jogControl = nullptr;
 
     
     MySerial(Stream& ioRef, ActuatorControl& actuatorRef, AndonLight& lightRef, Motors& motorsRef)
@@ -75,6 +79,10 @@ public:
     void attachUltrasonicServo(UltrasonicServo& s) {
         ultrasonicServo_ = &s;
     }
+
+    void attachJogControl(JogControl& jog) {
+            jogControl = &jog;
+        }
 
     // Helper for AndonManager: "is comms alive recently?"
     bool commsAlive() const {
@@ -199,6 +207,12 @@ public:
     void stateMachine(void) {
         receiveLinux();  // refresh timeout if traffic arrives
         checkTriggers(); // encoder-driven triggers
+
+        unsigned long now = millis();
+        if (now - lastEncoderEmitMs >= encoderEmitPeriodMs) {
+            lastEncoderEmitMs = now;
+            emitEncoderStatus();
+        }
 
         switch (state) {
         case LinkState::CONNECTED:
@@ -411,12 +425,41 @@ public:
             serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("reset_encoder")) {
-            for (int axis = 0; axis < 4; axis++) {
-                motors->resetAPOS(axis);
-            }
-            StaticJsonDocument<64> response;
+            motors->resetEncoders();
+
+            StaticJsonDocument<96> response;
             response["status"] = "All encoders reset";
-            serializeJson(response, *io); io->println();
+            response["type"] = "encoder_reset";
+            response["radius_m"] = 0.0;
+            serializeJson(response, *io);
+            io->println();
+
+            emitEncoderStatus();
+        }
+        else if (action.equalsIgnoreCase("set_encoder")) {
+            float radiusM = jsonPacket["radius_m"] | 0.0f;
+
+            // Keep operator input sane. Adjust upper bound if needed.
+            if (!isfinite(radiusM)) {
+                radiusM = 0.0f;
+            }
+
+            if (radiusM < 0.0f) {
+                radiusM = 0.0f;
+            }
+
+            motors->STOP();
+            motors->setRobotRearDistanceM(radiusM);
+
+            StaticJsonDocument<128> response;
+            response["status"] = "encoder_set";
+            response["type"] = "encoder_set";
+            response["radius_m"] = radiusM;
+            response["rear_distance_mm"] = radiusM * 1000.0f;
+            serializeJson(response, *io);
+            io->println();
+
+            emitEncoderStatus();
         }
         else if (action.equalsIgnoreCase("STOP")) {
             motors->STOP();
@@ -601,10 +644,72 @@ public:
             serializeJson(response, *io);
             io->println();
         }
+        else if (action.equalsIgnoreCase("jog")) {
+            if (!jogControl) {
+                StaticJsonDocument<128> err;
+                err["type"] = "error";
+                err["id"] = "jog";
+                err["error"] = "jog_not_attached";
+                serializeJson(err, *io); io->println();
+                return;
+            }
+
+            const char* dirStr = jsonPacket["dir"] | "";
+            int dir = 0;
+
+            if (strcasecmp(dirStr, "forward") == 0) {
+                dir = 1;
+            } else if (strcasecmp(dirStr, "backward") == 0) {
+                dir = -1;
+            } else {
+                StaticJsonDocument<128> err;
+                err["type"] = "error";
+                err["id"] = "jog";
+                err["error"] = "invalid_direction";
+                serializeJson(err, *io); io->println();
+                return;
+            }
+
+            float speed = jsonPacket["speed"] | CFG.jog.jog_speed_max_ms;
+            unsigned long leaseMs = jsonPacket["lease_ms"] | 250;
+            uint32_t seq = jsonPacket["seq"] | 0;
+
+            bool ok = jogControl->startOrRefreshRemoteJog(
+                dir,
+                speed,
+                leaseMs,
+                seq
+            );
+
+            StaticJsonDocument<160> response;
+            response["type"] = ok ? "ack" : "error";
+            response["id"] = "jog";
+            response["ok"] = ok;
+            response["seq"] = seq;
+
+            if (!ok) {
+                response["error"] = "jog_rejected";
+            }
+
+            serializeJson(response, *io); io->println();
+        }
+        else if (action.equalsIgnoreCase("jog_stop")) {
+            if (jogControl) {
+                uint32_t seq = jsonPacket["seq"] | 0;
+                jogControl->stopRemoteJog(seq);
+
+                StaticJsonDocument<128> response;
+                response["type"] = "ack";
+                response["id"] = "jog_stop";
+                response["ok"] = true;
+                response["seq"] = seq;
+                serializeJson(response, *io); io->println();
+            }
+        }
     }
     
     void checkTriggers() {
-        int currentPos = motors->requestAPOS();
+        int currentPos = motors->getRobotRearDistanceMM();
         unsigned long now = millis();
 
         for (auto& trig : triggerBuffer) {
@@ -639,10 +744,29 @@ public:
             }
         }
     }
+
+    void emitEncoderStatus() {
+        StaticJsonDocument<256> doc;
+
+        const float rearMm = motors->getRobotRearDistanceMM();
+        const float radiusM = rearMm / 1000.0f;
+
+        doc["type"] = "encoder";
+        doc["radius_m"] = radiusM;
+        doc["rear_distance_mm"] = rearMm;
+
+        JsonArray counts = doc.createNestedArray("counts");
+        for (int i = 0; i < 4; i++) {
+            counts.add(motors->encCounts[i]);
+        }
+
+        serializeJson(doc, *io);
+        io->println();
+    }
     
     //HMI Test Section
     void runTestMotor(const char* id, int index, float speed, unsigned long durationMs) {
-    int apos0 = motors->requestAPOS();  // uses your averaged encoder mm
+    int apos0 = motors->getRobotRearDistanceMM();  // uses your averaged encoder mm
     if (ultrasonic_) {
         ultrasonic_->processSpeed = speed;
         ultrasonic_->currentSpeed = speed;
@@ -650,7 +774,7 @@ public:
     unsigned long t0 = millis();
     while (millis() - t0 < durationMs) { delay(10); }
     motors->STOP();
-    int apos1 = motors->requestAPOS();
+    int apos1 = motors->getRobotRearDistanceMM();
 
     int delta = apos1 - apos0; // mm (per your scaling)
     StaticJsonDocument<128> meas;

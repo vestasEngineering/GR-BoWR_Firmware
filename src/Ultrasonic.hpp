@@ -7,34 +7,36 @@
 #include "Motors.hpp"
 #include "Config.hpp"
 
+// Legacy macro used by diagnostics / tests
 #define ULTRASONIC_PIN A2
 
 class Ultrasonic {
 public:
+    // ---- LEGACY PUBLIC STATE (required by other subsystems) ----
+    volatile int delay = 0;                  // used by timer ISR
+    float processSpeed = 0.0f;               // exposed target speed (m/s)
+    float currentSpeed = 0.0f;               // mirrors processSpeed (compat)
+    float distance[3]   = {0,0,0};            // filtered distance history
+    float mmPerVolt     = CFG.ultrasonic.mm_per_volt;
+    float offsetDistance= CFG.ultrasonic.offset_mm;
+    volatile uint16_t servoSettleDelay = 0; // ultrasonic servo delay in 10 ms ticks
 
-    Stream* io = nullptr;
-    Ultrasonic(Stream& ioRef) : io(&ioRef) {}
 
-    volatile int delay = 0;
-    float distance[3] = {0.0, 0.0, 0.0}; // [n, n-1, n-2]
-    float voltage = 0.0;
-    float measuredDistance = 0.0;
-    float mmPerVolt = (300.0 - 30.0) / (2.0 - 0.0);
-    float offsetDistance = 40.0;
-
-    float currentSpeed = 0.0;
-    float processSpeed = 0.0;
-
-    float setPoint = 180.0;
-    float tolerance = 2.0;
-    float lowerLimit = setPoint - tolerance;
-    float upperLimit = setPoint + tolerance;
-
+    // ---- INTERNAL ----
+    float measuredDistance = 0.0f;
     uint16_t badReadStreak = 0;
 
-    Motors* motors;
+    Motors* motors = nullptr;
 
-    PID pid = PID(3.5, 0.3, 0.08, setPoint);
+    float setPoint  = 175.0f;
+    float tolerance = 2.0f;
+
+    PID pid = PID(
+        CFG.ultrasonic.pid_kp,
+        CFG.ultrasonic.pid_ki,
+        CFG.ultrasonic.pid_kd,
+        setPoint
+    );
 
     Ultrasonic() {}
 
@@ -42,63 +44,88 @@ public:
         motors = &m;
     }
 
+    void notifyServoMoved(uint16_t settleTicks) {
+        servoSettleDelay = settleTicks;
+    }
+
     void setup() {
         analogReadResolution(10);
-        pid.setOutputLimits(CFG.ultrasonic.pid_out_min_ms, CFG.ultrasonic.pid_out_max_ms);
+        pid.setOutputLimits(
+            CFG.ultrasonic.pid_out_min_ms,
+            CFG.ultrasonic.pid_out_max_ms
+        );
         pid.setSampleTime(CFG.ultrasonic.pid_sample_time_s);
     }
 
-    void updateHeight(float height) {
-        pid.setSetpoint(height);
-        lowerLimit = height - tolerance;
-        upperLimit = height + tolerance;
+    bool isValidMeasurement(float d) {
+        return (d > CFG.ultrasonic.valid_min_mm &&
+                d < CFG.ultrasonic.valid_max_mm);
     }
 
-    bool isValidMeasurement(float d) {
-        return (d > CFG.ultrasonic.valid_min_mm && d < CFG.ultrasonic.valid_max_mm);
+    static float median3(float a, float b, float c) {
+        if (a > b) { float t = a; a = b; b = t; }
+        if (b > c) { float t = b; b = c; c = t; }
+        if (a > b) { float t = a; a = b; b = t; }
+        return b;
     }
 
     void stateMachine() {
-        if (!delay) {
-            voltage = (float(analogRead(CFG.ultrasonic.analog_pin)) * CFG.battery.vref / CFG.battery.adc_max_counts);
-            measuredDistance = voltage * CFG.ultrasonic.mm_per_volt + CFG.ultrasonic.offset_mm;
 
-            //io->print("Distance: ");
-            //io->println(measuredDistance);
+        if (servoSettleDelay > 0) {
+            return;  // Servo still moving — DO NOTHING
+        }
 
-            const bool isBad40 = fabsf(measuredDistance - CFG.ultrasonic.bad40_center_mm) <= CFG.ultrasonic.bad40_tol_mm;
+        if (delay) return;
+        delay = 10;  // 10 ms pacing (legacy behavior preserved)
 
-            if (!isValidMeasurement(measuredDistance)) {
-                if (isBad40) { if (badReadStreak < 0xFFFF) badReadStreak++; }
-                delay = 10; return;
-            } else {
-                badReadStreak = 0;
+        const float voltage =
+            analogRead(CFG.ultrasonic.analog_pin) *
+            CFG.battery.vref / CFG.battery.adc_max_counts;
+
+        measuredDistance =
+            voltage * mmPerVolt + offsetDistance;
+
+        if (!isValidMeasurement(measuredDistance)) {
+            if (++badReadStreak >
+                CFG.andonMgr.ultrasonic_bad_streak_threshold) {
+                if (motors) motors->STOP();
             }
+            return;
+        }
+        badReadStreak = 0;
 
-            // control band
-            lowerLimit = setPoint - CFG.ultrasonic.tolerance_mm;
-            upperLimit = setPoint + CFG.ultrasonic.tolerance_mm;
+        // shift history
+        distance[2] = distance[1];
+        distance[1] = distance[0];
+        distance[0] = measuredDistance;
 
-            if (distance[0] < CFG.ultrasonic.safe_stop_mm) {
-                processSpeed = 0.0f; currentSpeed = 0.0f;
-            } else {
-                float u = 0.0f;
-                if (distance[0] > upperLimit || distance[0] < lowerLimit) {
-                    u = pid.compute(distance[0]);
-                }
-                processSpeed = roundf(max(currentSpeed + u, 0.0f) * 10000.0f) / 10000.0f;
-                currentSpeed = processSpeed;
-            }
+        const float filteredDistance = median3(distance[0], distance[1], distance[2]);
 
-            // Apply motor speeds
+        // Stop when at or below target
+        if (measuredDistance >= (setPoint + tolerance)) {
+            processSpeed = 0.0f;
+            currentSpeed = 0.0f;
+
             if (motors) {
-                motors->speeds[0] = -processSpeed;
-                motors->speeds[1] = -processSpeed;
-                motors->speeds[2] =  processSpeed;
-                motors->speeds[3] =  processSpeed;
+                motors->STOP();
             }
+            return;
+        }
 
-            delay = 10; // 10ms
+        float targetSpeed = pid.compute(filteredDistance);
+
+        // Slew limit processSpeed
+        static constexpr float MAX_SPEED_STEP_MS = 0.02f;
+        float delta = targetSpeed - processSpeed;
+        if (delta >  MAX_SPEED_STEP_MS) delta =  MAX_SPEED_STEP_MS;
+        if (delta < -MAX_SPEED_STEP_MS) delta = -MAX_SPEED_STEP_MS;
+
+        processSpeed += delta;
+        currentSpeed = processSpeed;
+
+
+        if (motors) {
+            motors->setSpeeds(processSpeed, processSpeed, -processSpeed, -processSpeed);
         }
     }
 };

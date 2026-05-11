@@ -153,9 +153,9 @@ bool AndonManager::hasFault() const {
 void AndonManager::collectFaults(std::vector<AndonManager::FaultCode>& out) const {
   out.clear();
 
-  if (!clamp_.isClamped()) {
-    out.push_back(FaultCode::ClampUnclamped);
-  }
+  //if (!clamp_.isClamped()) {
+  //  out.push_back(FaultCode::ClampUnclamped);
+  //}
 
   
   // --- Ultrasonic Servo jam check: verify only during first few seconds of ACTIVE ---

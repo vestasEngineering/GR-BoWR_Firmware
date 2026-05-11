@@ -21,7 +21,7 @@ struct ActuatorCfg {
 
 struct AndonCfg {
     uint8_t  neo_addr            = 0x61;
-    uint16_t num_leds            = 36;
+    uint16_t num_leds            = 41;
     uint16_t frame_dt_ms         = 16;     // ~60 Hz
     uint16_t blink_interval_ms   = 500;
     uint16_t boot_duration_ms    = 5000;
@@ -95,7 +95,7 @@ struct MotorsCfg {
 struct JogCfg {
     int  pin_forward            = D1;
     int  pin_backward           = D10;
-    float jog_speed_max_ms      = 0.02f;
+    float jog_speed_max_ms      = 0.05f;
     uint16_t jog_duration_ms    = 1000;
 };
 
@@ -110,10 +110,10 @@ struct UltrasonicCfg {
     float bad40_tol_mm          = 0.5f;
 
     float pid_kp                = 3.5f;
-    float pid_ki                = 0.3f;
-    float pid_kd                = 0.08f;
-    float pid_out_min_ms        = -0.05f;
-    float pid_out_max_ms        = 0.008f;
+    float pid_ki                = 0; //old 0.3f
+    float pid_kd                = 0; //0.08f
+    float pid_out_min_ms        = -0.00f;
+    float pid_out_max_ms        = 0.50f;
     float pid_sample_time_s     = 0.01f;
 
     float tolerance_mm          = 2.0f;

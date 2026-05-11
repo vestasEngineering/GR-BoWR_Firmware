@@ -1,5 +1,4 @@
 #include "BootHealth.hpp"
-
 #include "AndonLight.hpp"
 #include "Motors.hpp"
 #include "Actuator.hpp"
@@ -7,207 +6,189 @@
 #include "UltrasonicServo.hpp"
 #include "BatteryMonitor.hpp"
 #include <Version.hpp>
-#include <Arduino_CAN.h>
 #include <ArduinoJson.h>
 #include "EStop.hpp"
 #include "ClampSensor.hpp"
 
 namespace BootHealth {
 
-static bool probeCAN_APOS_all(Motors& motors, uint32_t timeout_ms, uint8_t& mask_out) {
-  mask_out = 0;
+bool probeEncoders(Motors& motors, uint32_t timeoutMs, uint8_t& goodCount) {
+    uint32_t start = millis();
+    goodCount = 0;
 
-  // APOS query payload (MPL)
-  uint8_t aposCmd[4] = {0x11, 0x00, 0x28, 0x02};
+    while (millis() - start < timeoutMs) {
 
-  // Send APOS query to all 4 axes
-  for (uint8_t axis = 0; axis < 4; ++axis) {
-    CanMsg query(CanExtendedId(motors.MOTOR_APOS_IDS[axis]), sizeof(aposCmd), aposCmd);
-    CAN.write(query);
-  }
+        motors.pollEncoders();
 
-  const uint32_t start = millis();
-  while ((millis() - start) < timeout_ms && mask_out != 0x0F) {
-    if (CAN.available()) {
-      CanMsg msg = CAN.read();
-
-      // Let Motors parse/record positions
-      motors.handleCANResponse(msg);
-
-      // Detect APOS response here too to mark which axis responded
-      if (msg.data_length >= 8 && msg.data[2] == 0x28 && msg.data[3] == 0x02) {
-        // axisIndex in your code: (data[0] / 0x10) - 1 → maps {0..3}
-        uint8_t axisIndex = (msg.data[0] / 0x10u) - 1u;
-        if (axisIndex < 4u) {
-          mask_out |= (1u << axisIndex);
+        goodCount = 0;
+        for (int i = 0; i < 4; i++) {
+            // If the robot is booting, all encoders should read ~0
+            // and they shouldn't be NaN or giant corrupted numbers.
+            if (abs(motors.encCounts[i]) < 5 * Motors::ENCODER_CPR) {
+                goodCount++;
+            }
         }
-      }
+
+        if (goodCount >= 4) return true;
     }
-    delay(1); // small yield
-  }
 
-  return (mask_out == 0x0F);
+    return false;
 }
 
-static void checkUltrasonic(const Ultrasonic& u, Report& r) {
-  // Use same scaling as your Ultrasonic class
-  // Note: analogReadResolution already set in ultrasonic.setup()
-  int adc = analogRead(ULTRASONIC_PIN);
-  float voltage = (float(adc) * 3.1f / 1023.0f);
-  float distance = voltage * u.mmPerVolt + u.offsetDistance;
 
-  r.ultrasonic_adc = adc;
-  r.ultrasonic_voltage = voltage;
-  r.ultrasonic_distance = distance;
+static void checkUltrasonic(const Ultrasonic& u, BootHealth::Report& r) {
+    int adc = analogRead(ULTRASONIC_PIN);
+    float voltage = float(adc) * (3.1f / 1023.0f);
+    float distance = voltage * u.mmPerVolt + u.offsetDistance;
 
-  // Consider "ok" if the reading is within a plausible operating window
-  // or at least not pegged. Your runtime window is 45..250 mm.
-  const bool plausible =
-      (distance > 30.0f && distance < 400.0f) || (adc > 0 && adc < 1023);
+    r.ultrasonic_adc      = adc;
+    r.ultrasonic_voltage  = voltage;
+    r.ultrasonic_distance = distance;
 
-  r.ultrasonic_ok = plausible;
+    // Consider “OK” if not pegged and within physical plausibility
+    const bool plausible =
+        (distance > 20.0f && distance < 800.0f) ||
+        (adc > 0 && adc < 1023);
+
+    r.ultrasonic_ok = plausible;
 }
 
-static void checkUltrasonicServo(const UltrasonicServo& /*us*/, Report& r) {
-  // Servo library has Servo::attached(), but UltrasonicServo doesn't expose it.
-  // Best-effort: if setup() completed without error, we assume ok.
-  // You can refine by exposing a method that returns servo.attached().
-  r.ultrasonic_servo_ok = true;
+
+static void checkUltrasonicServo(const UltrasonicServo& /*us*/, BootHealth::Report& r) {
+    // Your UltrasonicServo class does not expose servo.attached()
+    // Assume servo attached if setup succeeded.
+    r.ultrasonic_servo_ok = true;
 }
 
-static void checkActuator(const ActuatorControl& a, Report& r) {
-  // PCB or jam faults → not ok
-  r.actuator_ok = !a.hasFault();
+
+static void checkActuator(const ActuatorControl& a, BootHealth::Report& r) {
+    r.actuator_ok = !a.hasFault();
 }
 
-static void checkBattery(BatteryMonitor* b, Report& r) {
-  if (!b) {
-    r.battery_ok = true; // Not used = don't block boot
-    return;
-  }
 
-  // Update once (non-blocking)
-  b->readBatteryVoltage();
+static void checkBattery(BatteryMonitor* b, BootHealth::Report& r) {
+    if (!b) {
+        r.battery_ok = true;
+        return;
+    }
 
-  r.battery_voltage = b->voltage;
+    b->readBatteryVoltage();
 
-  // Compute % inline to avoid depending on optional helpers
-  float pct = (b->voltage - MIN_BATTERY_VOLTAGE) /
-              (MAX_BATTERY_VOLTAGE - MIN_BATTERY_VOLTAGE) * 100.0f;
-  if (pct < 0.0f) pct = 0.0f;
-  if (pct > 100.0f) pct = 100.0f;
-  r.battery_pct = pct;
+    r.battery_voltage = b->voltage;
 
-  // Consider ok if above a very low threshold (e.g., > 10% SOC)
-  r.battery_ok = (pct > 10.0f);
+    float pct = (b->voltage - MIN_BATTERY_VOLTAGE) /
+                (MAX_BATTERY_VOLTAGE - MIN_BATTERY_VOLTAGE) * 100.0f;
+
+    pct = constrain(pct, 0.0f, 100.0f);
+    r.battery_pct = pct;
+
+    // Consider OK unless critically low (below 10%)
+    r.battery_ok = (pct > 10.0f);
 }
 
-static void checkClamp(const ClampSensor& c, Report& r) {
-  r.clamp_state = c.isClamped();
-  r.clamp_ok    = r.clamp_state;
+
+static void checkClamp(const ClampSensor& c, BootHealth::Report& r) {
+    r.clamp_state = c.isClamped();
+    r.clamp_ok    = r.clamp_state;
 }
 
-Report run(AndonLight& light,
-           Motors& motors,
-           ActuatorControl& actuator,
-           Ultrasonic& ultrasonic,
-           UltrasonicServo& us_servo,
-           BatteryMonitor* battery,
-           EStop& estop,
-           uint32_t can_timeout_ms) {
-  Report r;
-  r.timeout_ms_used = can_timeout_ms;
 
-  // If we reached here, Andon light I2C init didn't hard-fail (Andon code halts on failure)
-  r.andon_ok = true;
+BootHealth::Report run(AndonLight& light,
+                       Motors& motors,
+                       ActuatorControl& actuator,
+                       Ultrasonic& ultrasonic,
+                       UltrasonicServo& us_servo,
+                       BatteryMonitor* battery,
+                       EStop& estop,
+                       uint32_t timeoutMs)
+{
+    BootHealth::Report r;
+    r.timeout_ms_used = timeoutMs;
 
-  // Probe CAN for all four motors via APOS
-  r.can_ok = probeCAN_APOS_all(motors, can_timeout_ms, r.can_axes_mask);
-  r.motors_ok = r.can_ok; // motors_ok aliases can_ok presence at boot
+    r.andon_ok = true;
 
-  // Ultrasonic ADC → distance sanity
-  checkUltrasonic(ultrasonic, r);
 
-  // Servo (best-effort)
-  checkUltrasonicServo(us_servo, r);
+    uint8_t goodCount = 0;
+    bool encOk = BootHealth::probeEncoders(motors, timeoutMs, goodCount);
 
-  // Actuator PCB/jam
-  checkActuator(actuator, r);
+    r.encoders_ok = encOk;
+    r.encoders_present_mask = 
+        (goodCount >= 4 ? 0x0F : (uint8_t)((1 << goodCount) - 1));
 
-  // Battery (optional)
-  checkBattery(battery, r);
 
-  // E-Stop state
-  r.estop_active = estop.isActive();
 
-  // Overall OK only if all required subsystems pass
-  // Battery optional: if you want battery to gate boot, include it in the AND
-  r.ok = r.andon_ok &&
-         r.can_ok &&
-         r.ultrasonic_ok &&
-         r.ultrasonic_servo_ok &&
-         r.actuator_ok &&
-         r.motors_ok &&
-         r.battery_ok;
+    r.motors_ok = (r.encoders_ok);
+    checkUltrasonic(ultrasonic, r);
+    checkUltrasonicServo(us_servo, r);
+    checkActuator(actuator, r);
+    checkBattery(battery, r);
+    r.estop_active = estop.isActive();
 
-  return r;
+    r.ok =
+        r.andon_ok &&
+        r.encoders_ok &&              // formerly “CAN OK”, now encoder comm OK
+        r.ultrasonic_ok &&
+        r.ultrasonic_servo_ok &&
+        r.actuator_ok &&
+        r.motors_ok &&
+        r.battery_ok;
+
+    return r;
 }
 
-void sendReport(const Report& r, Stream& out) {
-  StaticJsonDocument<640> doc;
-  doc["type"]  = "boot_health";
-  doc["ts_ms"] = millis();
-  doc["ok"]    = r.ok;
+void sendReport(const BootHealth::Report& r, Stream& out) {
+    StaticJsonDocument<640> doc;
 
-  JsonObject checks = doc.createNestedObject("checks");
+    doc["type"]  = "boot_health";
+    doc["ts_ms"] = millis();
+    doc["ok"]    = r.ok;
 
-  checks["andon"]["ok"] = r.andon_ok;
+    JsonObject checks = doc.createNestedObject("checks");
 
-  {
-    JsonObject can = checks.createNestedObject("can");
-    can["ok"] = r.can_ok;
-    can["responded_axes_mask"] = r.can_axes_mask; // bitmask
-    can["timeout_ms"] = r.timeout_ms_used;
-  }
+    checks["andon"]["ok"] = r.andon_ok;
 
-  checks["motors"]["ok"] = r.motors_ok;
+    {
+        JsonObject enc = checks.createNestedObject("encoders");
+        enc["ok"] = r.encoders_ok;
+        enc["present_mask"] = r.encoders_present_mask;   // bitmask of encoder channels detected
+        enc["timeout_ms"] = r.timeout_ms_used;
+      }
 
-  {
-    JsonObject us = checks.createNestedObject("ultrasonic");
-    us["ok"] = r.ultrasonic_ok;
-    us["adc"] = r.ultrasonic_adc;
-    us["voltage"] = r.ultrasonic_voltage;
-    us["distance_mm"] = r.ultrasonic_distance;
-  }
+    checks["motors"]["ok"] = r.motors_ok;
 
-  checks["ultrasonic_servo"]["ok"] = r.ultrasonic_servo_ok;
+    {
+        JsonObject us = checks.createNestedObject("ultrasonic");
+        us["ok"] = r.ultrasonic_ok;
+        us["adc"] = r.ultrasonic_adc;
+        us["voltage"] = r.ultrasonic_voltage;
+        us["distance_mm"] = r.ultrasonic_distance;
+    }
 
-  checks["actuator"]["ok"] = r.actuator_ok;
+    checks["ultrasonic_servo"]["ok"] = r.ultrasonic_servo_ok;
+    checks["actuator"]["ok"]          = r.actuator_ok;
+    checks["estop"]["active"]         = r.estop_active;
 
-  checks["estop"]["active"] = r.estop_active;
+    {
+        JsonObject bat = checks.createNestedObject("battery");
+        bat["ok"]      = r.battery_ok;
+        bat["voltage"] = r.battery_voltage;
+        bat["pct"]     = r.battery_pct;
+    }
 
-  {
-    JsonObject bat = checks.createNestedObject("battery");
-    bat["ok"] = r.battery_ok;
-    bat["voltage"] = r.battery_voltage;
-    bat["pct"] = r.battery_pct;
-  }
-  
-  {
-  JsonObject fw = doc.createNestedObject("firmware");
-  fw["model"]     = Version::model();
-  fw["fleet_id"]  = Version::fleetId();
-  fw["semver"]    = Version::semver();
-  fw["build"]     = Version::buildStamp();
-  fw["board"]     = Version::board();
-  fw["platform"]  = Version::platform();
-  fw["channel"]   = Version::channel();
-  fw["git"]       = Version::shortGit();
-  }
+    {
+        JsonObject fw = doc.createNestedObject("firmware");
+        fw["model"]     = Version::model();
+        fw["fleet_id"]  = Version::fleetId();
+        fw["semver"]    = Version::semver();
+        fw["build"]     = Version::buildStamp();
+        fw["board"]     = Version::board();
+        fw["platform"]  = Version::platform();
+        fw["channel"]   = Version::channel();
+        fw["git"]       = Version::shortGit();
+    }
 
-
-  serializeJson(doc, out);
-  out.println();
+    serializeJson(doc, out);
+    out.println();
 }
 
 }
