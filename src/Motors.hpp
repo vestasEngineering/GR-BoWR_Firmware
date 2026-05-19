@@ -28,12 +28,30 @@ public:
     static constexpr float ZERO_SPEED_THRESHOLD_MS = 0.0002f;
 
     // Safe motor command limits.
-    int32_t maxCommandQpps = 10000;
-    static constexpr uint32_t ACCEL_QPPS_S = 15000;
+    int32_t maxCommandQpps = 2500; //10000 original
+    int32_t accelQppsPerSec = 4250;
+
+    int32_t brakeDecelQppsPerSec = 8500;
+
+    bool closedLoopStopActive = false;
 
     static constexpr float DISTANCE_MM_PER_COUNT = 0.0245793145f;
 
     static const int8_t AXIS_SIGN[4];
+    
+    int8_t motorDirection[4] = { 1, -1, -1, 1 };
+
+    void setMotorDirection(uint8_t axis, int8_t dir) {
+        if (axis >= 4) return;
+        motorDirection[axis] = (dir < 0) ? -1 : 1;
+    }
+
+    void setMotorDirections(int8_t d0, int8_t d1, int8_t d2, int8_t d3) {
+        motorDirection[0] = (d0 < 0) ? -1 : 1;
+        motorDirection[1] = (d1 < 0) ? -1 : 1;
+        motorDirection[2] = (d2 < 0) ? -1 : 1;
+        motorDirection[3] = (d3 < 0) ? -1 : 1;
+    }
 
     float   speeds[4]    = {0, 0, 0, 0};
     int32_t encCounts[4] = {0, 0, 0, 0};
@@ -59,6 +77,7 @@ public:
     // ------------------------------------------------------------
     void setSpeeds(float s0, float s1, float s2, float s3);
     void STOP();
+    void BRAKE_STOP();
 
     // ------------------------------------------------------------
     // Encoder maintenance / polling

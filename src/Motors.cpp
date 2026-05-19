@@ -65,6 +65,15 @@ void Motors::setSpeeds(float s0, float s1, float s2, float s3) {
     speeds[1] = s1;
     speeds[2] = s2;
     speeds[3] = s3;
+
+    // If any real motion command is requested, leave closed-loop stop mode.
+    if (fabsf(s0) >= ZERO_SPEED_THRESHOLD_MS ||
+        fabsf(s1) >= ZERO_SPEED_THRESHOLD_MS ||
+        fabsf(s2) >= ZERO_SPEED_THRESHOLD_MS ||
+        fabsf(s3) >= ZERO_SPEED_THRESHOLD_MS) {
+        closedLoopStopActive = false;
+    }
+
     interrupts();
 }
 
@@ -89,20 +98,26 @@ void Motors::sendSpeeds() {
     int32_t q2 = clamp_i32(ms_to_qpps(speeds[2]), -maxCommandQpps, maxCommandQpps);
     int32_t q3 = clamp_i32(ms_to_qpps(speeds[3]), -maxCommandQpps, maxCommandQpps);
 
-    const uint32_t a_m1 = u32bits(q0);
-    const uint32_t a_m2 = u32bits(-q1);
-    const uint32_t b_m1 = u32bits(-q2);
-    const uint32_t b_m2 = u32bits(q3);
+    const uint32_t a_m1 = u32bits(q0 * motorDirection[0]);
+    const uint32_t a_m2 = u32bits(q1 * motorDirection[1]);
+    const uint32_t b_m1 = u32bits(q2 * motorDirection[2]);
+    const uint32_t b_m2 = u32bits(q3 * motorDirection[3]);
 
     // If everything is commanded to zero, send raw zero duty instead of speed=0.
     if (q0 == 0 && q1 == 0 && q2 == 0 && q3 == 0) {
-        rcA.DutyM1M2(ADDR_A, 0, 0);
-        rcB.DutyM1M2(ADDR_B, 0, 0);
+        if (closedLoopStopActive) {
+            rcA.SpeedAccelM1M2(ADDR_A, brakeDecelQppsPerSec, 0, 0);
+            rcB.SpeedAccelM1M2(ADDR_B, brakeDecelQppsPerSec, 0, 0);
+        } else {
+            rcA.DutyM1M2(ADDR_A, 0, 0);
+            rcB.DutyM1M2(ADDR_B, 0, 0);
+        }
         return;
     }
 
-    rcA.SpeedAccelM1M2(ADDR_A, ACCEL_QPPS_S, a_m1, a_m2);
-    rcB.SpeedAccelM1M2(ADDR_B, ACCEL_QPPS_S, b_m1, b_m2);
+
+    rcA.SpeedAccelM1M2(ADDR_A, accelQppsPerSec, a_m1, a_m2);
+    rcB.SpeedAccelM1M2(ADDR_B, accelQppsPerSec, b_m1, b_m2);
 }
 
 
@@ -199,8 +214,19 @@ void Motors::STOP() {
         s = 0.0f;
     }
 
+    closedLoopStopActive = false;
+
     rcA.DutyM1M2(ADDR_A, 0, 0);
     rcB.DutyM1M2(ADDR_B, 0, 0);
+}
+
+void Motors::BRAKE_STOP() {
+    for (float &s : speeds) {
+        s = 0.0f;
+    }
+
+    rcA.SpeedAccelM1M2(ADDR_A, brakeDecelQppsPerSec, 0, 0);
+    rcB.SpeedAccelM1M2(ADDR_B, brakeDecelQppsPerSec, 0, 0);
 }
 
 

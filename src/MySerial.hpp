@@ -13,6 +13,7 @@
 #include "BatteryMonitor.hpp"
 #include "UltrasonicServo.hpp"
 #include "JogControl.hpp"
+#include "Version.hpp"
 
 class AndonManager;
 class Ultrasonic;
@@ -551,6 +552,72 @@ public:
             response["status"] = "triggers_loaded";
             response["count"]  = triggerBuffer.size();
             serializeJson(response, *io); io->println();
+        }
+        else if (action.equalsIgnoreCase("set_motor_tuning")) {
+            int32_t maxSpeed = jsonPacket["max_speed"] | 2500;
+            int32_t accel    = jsonPacket["accel"] | 4250;
+            int32_t decel    = jsonPacket["decel"] | 8500;
+
+            motors->maxCommandQpps = maxSpeed;
+            motors->accelQppsPerSec = (accel > decel) ? accel : decel;
+            motors->brakeDecelQppsPerSec = decel;
+
+            // These are sent in physical units for the PID/process slew limiter.
+            float accelMps2 = jsonPacket["accel_mps2"] | CFG.ultrasonic.motion_accel_mps2;
+            float decelMps2 = jsonPacket["decel_mps2"] | CFG.ultrasonic.motion_decel_mps2;
+
+            if (accelMps2 < 0.0f) accelMps2 = CFG.ultrasonic.motion_accel_mps2;
+            if (decelMps2 < 0.0f) decelMps2 = CFG.ultrasonic.motion_decel_mps2;
+
+            if (ultrasonic_) {
+                ultrasonic_->maxAccelMps2 = accelMps2;
+                ultrasonic_->maxDecelMps2 = decelMps2;
+            }
+
+            StaticJsonDocument<192> response;
+            response["type"] = "ack";
+            response["ok"] = true;
+            response["info"] = "motor_tuning_set";
+            response["max_speed_qpps"] = maxSpeed;
+            response["accel_qpps_s"] = accel;
+            response["decel_qpps_s"] = decel;
+            response["roboclaw_accel_qpps_s"] = motors->accelQppsPerSec;
+            response["accel_mps2"] = accelMps2;
+            response["decel_mps2"] = decelMps2;
+            serializeJson(response, *io); 
+            io->println();
+        }
+        else if (action.equalsIgnoreCase("set_motor_direction")) {
+            int d0 = jsonPacket["directions"][0] | 1;
+            int d1 = jsonPacket["directions"][1] | -1;
+            int d2 = jsonPacket["directions"][2] | -1;
+            int d3 = jsonPacket["directions"][3] | 1;
+
+            motors->STOP();
+
+            motors->setMotorDirections(
+                d0 < 0 ? -1 : 1,
+                d1 < 0 ? -1 : 1,
+                d2 < 0 ? -1 : 1,
+                d3 < 0 ? -1 : 1
+            );
+
+            StaticJsonDocument<160> response;
+            response["type"] = "ack";
+            response["ok"] = true;
+            response["info"] = "motor_direction_set";
+
+            JsonArray arr = response.createNestedArray("directions");
+            arr.add(motors->motorDirection[0]);
+            arr.add(motors->motorDirection[1]);
+            arr.add(motors->motorDirection[2]);
+            arr.add(motors->motorDirection[3]);
+
+            serializeJson(response, *io);
+            io->println();
+        }
+        else if (action.equalsIgnoreCase("get_firmware")) {
+            Version::printJson(*io);
         }
         else if (action.equalsIgnoreCase("start_process")) {
             if (ultrasonicEnabled_) *ultrasonicEnabled_ = true;

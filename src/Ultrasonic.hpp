@@ -6,6 +6,7 @@
 #include "PID.hpp"
 #include "Motors.hpp"
 #include "Config.hpp"
+#include <math.h>
 
 // Legacy macro used by diagnostics / tests
 #define ULTRASONIC_PIN A2
@@ -25,6 +26,9 @@ public:
     // ---- INTERNAL ----
     float measuredDistance = 0.0f;
     uint16_t badReadStreak = 0;
+    
+    float maxAccelMps2 = CFG.ultrasonic.motion_accel_mps2;
+    float maxDecelMps2 = CFG.ultrasonic.motion_decel_mps2;
 
     Motors* motors = nullptr;
 
@@ -102,31 +106,55 @@ public:
         const float filteredDistance = median3(distance[0], distance[1], distance[2]);
 
         // Stop when at or below target
-        if (measuredDistance >= (setPoint + tolerance)) {
-            processSpeed = 0.0f;
-            currentSpeed = 0.0f;
+        float targetSpeed = 0.0f;
 
-            if (motors) {
-                motors->STOP();
-            }
-            return;
+        // Stop condition: command target speed to zero,
+        // but allow the decel slew limiter to ramp processSpeed down.
+        if (measuredDistance >= (setPoint + tolerance)) {
+            targetSpeed = 0.0f;
+        } else {
+            targetSpeed = pid.compute(filteredDistance);
         }
 
-        float targetSpeed = pid.compute(filteredDistance);
-
         // Slew limit processSpeed
-        static constexpr float MAX_SPEED_STEP_MS = 0.02f;
+        const float dt = CFG.ultrasonic.pid_sample_time_s;
+
         float delta = targetSpeed - processSpeed;
-        if (delta >  MAX_SPEED_STEP_MS) delta =  MAX_SPEED_STEP_MS;
-        if (delta < -MAX_SPEED_STEP_MS) delta = -MAX_SPEED_STEP_MS;
+
+        if (delta > 0.0f) {
+            // Speeding up
+            const float maxStepUp = maxAccelMps2 * dt;
+            if (delta > maxStepUp) {
+                delta = maxStepUp;
+            }
+        } else if (delta < 0.0f) {
+            // Slowing down
+            const float maxStepDown = maxDecelMps2 * dt;
+            if (delta < -maxStepDown) {
+                delta = -maxStepDown;
+            }
+        }
 
         processSpeed += delta;
         currentSpeed = processSpeed;
 
-
         if (motors) {
-            motors->setSpeeds(processSpeed, processSpeed, -processSpeed, -processSpeed);
+            if (fabsf(processSpeed) < Motors::ZERO_SPEED_THRESHOLD_MS) {
+                processSpeed = 0.0f;
+                currentSpeed = 0.0f;
+
+                // Controlled closed-loop stop instead of raw duty zero.
+                motors->BRAKE_STOP();
+            } else {
+                motors->setSpeeds(
+                    processSpeed,
+                    processSpeed,
+                    -processSpeed,
+                    -processSpeed
+                );
+            }
         }
+
     }
 };
 

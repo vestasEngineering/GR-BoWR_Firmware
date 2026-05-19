@@ -116,6 +116,9 @@ struct UltrasonicCfg {
     float pid_out_max_ms        = 0.50f;
     float pid_sample_time_s     = 0.01f;
 
+    float motion_accel_mps2     = 0.15f;
+    float motion_decel_mps2     = 0.30f;
+
     float tolerance_mm          = 2.0f;
     float safe_stop_mm          = 70.0f;
 };

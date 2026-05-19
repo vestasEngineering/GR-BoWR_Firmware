@@ -14,6 +14,7 @@
 static constexpr uint16_t kUltrasonicBadStreakThreshold = 20;
 static constexpr float    kUTServoTooCloseThreshold     = 60.0f;
 constexpr AndonManager::Config AndonManager::kDefaultCfg;
+extern bool ultrasonicEnabled;
 
 const char* AndonManager::faultToKey(FaultCode f) {
   switch (f) {
@@ -134,7 +135,7 @@ AndonLight::States AndonManager::compute(uint32_t /*now*/) {
   if (isBlockedOrStarved())    return AndonLight::BLINK_YELLOW;
   if (isPausedOrJog())         return AndonLight::BLUE;
   if (isBatteryLow())          return AndonLight::BLINK_YELLOW;
-  if (isRunning())             return AndonLight::GREEN;
+  if (isRunning())             return AndonLight::BLINK_GREEN;
   return AndonLight::GREEN;
 }
 
@@ -157,6 +158,7 @@ void AndonManager::collectFaults(std::vector<AndonManager::FaultCode>& out) cons
   //  out.push_back(FaultCode::ClampUnclamped);
   //}
 
+  /*
   
   // --- Ultrasonic Servo jam check: verify only during first few seconds of ACTIVE ---
   {
@@ -231,6 +233,8 @@ void AndonManager::collectFaults(std::vector<AndonManager::FaultCode>& out) cons
   if (ultrasonic_.badReadStreak >= CFG.andonMgr.ultrasonic_bad_streak_threshold) {
     out.push_back(FaultCode::UltrasonicPersistent);
   }
+
+  */
   
   if (battery_.isCritical(CFG.battery.critical_pct)) {
     out.push_back(FaultCode::BatteryCritical);
@@ -335,65 +339,28 @@ bool AndonManager::isBatteryLow() const {
 
 bool AndonManager::isRunning() const {
 
-  /*
+  const uint32_t kDwellMs = 300;  // small smoothing buffer
 
-  // Tunables
-  const float    kSpeedEps_ms         = 0.0010f;  // m/s threshold to consider a non-zero command
-  const float    kPosDeltaEps_rev     = 0.0020f;  // min encoder delta (revolutions) to count as motion
-  const uint32_t kSamplePeriodMs      = 100;      // how often we sample deltas
-  const uint32_t kMovingDwellMs       = 500;      // keep "running" true for a short time after movement
-
-  static bool     initialized      = false;
-  static uint32_t lastSampleMs     = 0;
-  static float    lastPos[4]       = {0, 0, 0, 0};
-  static bool     isMovingLatched  = false;
-  static uint32_t movingUntilMs    = 0;
+  static bool initialized      = false;
+  static bool latched          = false;
+  static uint32_t runningUntil = 0;
 
   const uint32_t now = millis();
 
-  // Init on first call
-  if (!initialized) {
-    for (int i = 0; i < 4; ++i) {
-      lastPos[i] = motors_.positions[i];
-    }
-    lastSampleMs    = now;
-    movingUntilMs   = now;
-    isMovingLatched = false;
-    initialized     = true;
+  // Primary signal: process state
+  bool processActive = ultrasonicEnabled;
+
+  // Optional: include actuator / clamp states if they matter
+  // bool processActive = ultrasonicEnabled || actuator.isBusy() || clamp.isActive();
+
+  // Latch logic to prevent flicker during transitions
+  if (processActive) {
+    latched      = true;
+    runningUntil = now + kDwellMs;
+  }
+  else if (latched && now > runningUntil) {
+    latched = false;
   }
 
-  // 1) Quick check: commanded speeds
-  bool hasCommand = false;
-  for (int i = 0; i < 4; ++i) {
-    if (fabsf(motors_.speeds[i]) > kSpeedEps_ms) {
-      hasCommand = true;
-      break;
-    }
-  }
-
-  // 2) Position change check (sampled)
-  bool anyPosMove = false;
-  if (now - lastSampleMs >= kSamplePeriodMs) {
-    for (int i = 0; i < 4; ++i) {
-      float d = fabsf(motors_.positions[i] - lastPos[i]);
-      if (d > kPosDeltaEps_rev) {
-        anyPosMove = true;
-      }
-      lastPos[i] = motors_.positions[i];
-    }
-    lastSampleMs = now;
-  }
-
-  // 3) Latch movement with a dwell to avoid flicker
-  if (hasCommand || anyPosMove) {
-    isMovingLatched = true;
-    movingUntilMs   = now + kMovingDwellMs;
-  } else if (isMovingLatched && now > movingUntilMs) {
-    isMovingLatched = false;
-  }
-
-  return isMovingLatched;
-  */
-
-  return false; //Remove after PCBA Installed
+  return latched;
 }
