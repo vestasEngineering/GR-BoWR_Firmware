@@ -10,7 +10,7 @@ struct ActuatorCfg {
     float maxFeedbackVoltage     = 5.0f;
 
     uint16_t settle_ms           = 15000;
-    float    activate_cmd_min_v  = 4.5f;
+    float    activate_cmd_min_v  = 5.0f;
     float    deactivate_cmd_max_v= 0.5f;
     float    active_fb_min_v     = 4.0f;
     float    inactive_fb_max_v   = 2.0f;
@@ -100,27 +100,45 @@ struct JogCfg {
 };
 
 struct UltrasonicCfg {
-    uint8_t analog_pin          = A2;
-    float mm_per_volt           = (300.0f - 30.0f) / (2.0f - 0.0f);
-    float offset_mm             = 40.0f;
+    uint8_t analog_pin           = A2;
 
-    float valid_min_mm          = 45.0f;
-    float valid_max_mm          = 250.0f;
-    float bad40_center_mm       = 40.0f;
-    float bad40_tol_mm          = 0.5f;
+    float mm_per_volt            = (300.0f - 30.0f) / (2.0f - 0.0f);
+    float offset_mm              = 40.0f;
 
-    float pid_kp                = 3.5f;
-    float pid_ki                = 0; //old 0.3f
-    float pid_kd                = 0; //0.08f
-    float pid_out_min_ms        = -0.00f;
-    float pid_out_max_ms        = 0.50f;
-    float pid_sample_time_s     = 0.01f;
+    float valid_min_mm           = 45.0f;
+    float valid_max_mm           = 250.0f;
 
-    float motion_accel_mps2     = 0.15f;
-    float motion_decel_mps2     = 0.30f;
+    float ignored_close_min_mm   = 38.0f;
+    float ignored_close_max_mm   = 47.0f;
 
-    float tolerance_mm          = 2.0f;
-    float safe_stop_mm          = 70.0f;
+    float control_loop_dt_s      = 0.01f;
+
+    float motion_accel_mps2      = 0.15f;
+    float motion_decel_mps2      = 0.30f;
+
+    float setpoint_mm            = 165.0f;
+    
+    float base_speed_ms          = 0.095f; // Feed-forward base speed: 0.095 m/s = 95 mm/s.
+
+    float kp_speed_up_track      = 0.00025f;
+    float kp_slow_down_track     = 0.0020f;
+
+    float max_speed_ms           = 0.25f;
+
+    float min_track_speed_ms     = 0.035f;
+    float max_track_speed_ms     = 0.120f;
+
+    float tracking_deadband_mm   = 3.0f;
+
+    float wait_range_mm          = 25.0f;
+
+    uint8_t good_glue_required   = 3;
+
+    float track_accel_mps2       = 0.25f;
+    float track_decel_mps2       = 1.00f;
+
+    bool telemetry_enabled       = true;
+    uint16_t telemetry_period_ms = 50; // 20 Hz
 };
 
 struct UltrasonicServoCfg {
