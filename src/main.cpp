@@ -204,16 +204,17 @@ void setup() {
 void loop() {
   
   if (andonLight.booting) {
+    motors.setMotionInhibited(true);
     andonLight.loop();
     return;
   }
-
   andonLight.loop();
-  mySerial.stateMachine();
-  jogControl.update();
-  motors.update();
   estop.tick();
   clamp.tick();
+  batteryMonitor.stateMachine();
+  andonMgr.enforceMotionSafety();
+  mySerial.stateMachine();
+  jogControl.update();
 
   if (ultrasonicEnabled) {
       ultrasonicServo.activate();  // Servo active when ultrasonic is enabled
@@ -226,6 +227,7 @@ void loop() {
   };
 
   actuator.stateMachine();
-  batteryMonitor.stateMachine();
+  andonMgr.enforceMotionSafety();
+  motors.update();
   andonMgr.tick();
 }

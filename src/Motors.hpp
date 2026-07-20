@@ -61,6 +61,23 @@ public:
     uint16_t pollHz = 50;
 
     // ------------------------------------------------------------
+    // Motion safety inhibit
+    // ------------------------------------------------------------
+    // When asserted:
+    //   - Existing commands are cleared.
+    //   - A zero-speed command is sent immediately.
+    //   - Future nonzero commands are rejected/gated.
+    //
+    // When released:
+    //   - Speeds remain zero.
+    //   - A fresh command is required before motion resumes.
+    void setMotionInhibited(bool inhibited);
+
+    bool isMotionInhibited() const {
+        return motionInhibited_;
+    }
+
+    // ------------------------------------------------------------
     // Construction
     // ------------------------------------------------------------
     Motors();
@@ -136,6 +153,7 @@ private:
     // Internal helpers
     // ------------------------------------------------------------
     static uint32_t u32bits(int32_t v);
+    volatile bool motionInhibited_ = false;
 
     int32_t ms_to_qpps(float ms) const;
 

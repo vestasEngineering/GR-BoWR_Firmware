@@ -37,9 +37,9 @@ bool probeEncoders(Motors& motors, uint32_t timeoutMs, uint8_t& goodCount) {
 
 
 static void checkUltrasonic(const Ultrasonic& u, BootHealth::Report& r) {
-    int adc = analogRead(ULTRASONIC_PIN);
+    int adc = analogRead(CFG.ultrasonic.analog_pin);
     float voltage = float(adc) * (3.1f / 1023.0f);
-    float distance = voltage * u.mmPerVolt + u.offsetDistance;
+    float distance = voltage * CFG.ultrasonic.mm_per_volt + CFG.ultrasonic.offset_mm;
 
     r.ultrasonic_adc      = adc;
     r.ultrasonic_voltage  = voltage;

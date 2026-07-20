@@ -52,6 +52,8 @@ public:
   void setOverride(AndonLight::States s);
   void clearOverride();
   void tick();
+  void enforceMotionSafety();
+  bool motionStopRequired() const;
   AndonLight::States currentState() const;
 
 private:

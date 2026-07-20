@@ -60,13 +60,29 @@ int32_t Motors::ms_to_qpps(float ms) const {
 
 // ---------- Send commands ----------
 void Motors::setSpeeds(float s0, float s1, float s2, float s3) {
+    // Sanitize all command inputs.
+    if (!isfinite(s0)) s0 = 0.0f;
+    if (!isfinite(s1)) s1 = 0.0f;
+    if (!isfinite(s2)) s2 = 0.0f;
+    if (!isfinite(s3)) s3 = 0.0f;
+
     noInterrupts();
+
+    if (motionInhibited_) {
+        speeds[0] = 0.0f;
+        speeds[1] = 0.0f;
+        speeds[2] = 0.0f;
+        speeds[3] = 0.0f;
+
+        interrupts();
+        return;
+    }
+
     speeds[0] = s0;
     speeds[1] = s1;
     speeds[2] = s2;
     speeds[3] = s3;
 
-    // If any real motion command is requested, leave closed-loop stop mode.
     if (fabsf(s0) >= ZERO_SPEED_THRESHOLD_MS ||
         fabsf(s1) >= ZERO_SPEED_THRESHOLD_MS ||
         fabsf(s2) >= ZERO_SPEED_THRESHOLD_MS ||
@@ -75,6 +91,38 @@ void Motors::setSpeeds(float s0, float s1, float s2, float s3) {
     }
 
     interrupts();
+}
+
+void Motors::setMotionInhibited(bool inhibited) {
+    bool changed = false;
+
+    noInterrupts();
+
+    if (motionInhibited_ != inhibited) {
+        motionInhibited_ = inhibited;
+        changed = true;
+    }
+
+    // Always clear stored commands while inhibited.
+    //
+    // Also clear them when the inhibit is released so that an old command
+    // cannot automatically resume motion.
+    if (inhibited || changed) {
+        speeds[0] = 0.0f;
+        speeds[1] = 0.0f;
+        speeds[2] = 0.0f;
+        speeds[3] = 0.0f;
+    }
+
+    interrupts();
+
+    if (changed && inhibited) {
+        // Immediate command to the controllers.
+        //
+        // Use BRAKE_STOP() if controlled deceleration is mechanically safer.
+        // Use STOP() if zero duty/coast is the intended fault response.
+        BRAKE_STOP();
+    }
 }
 
 void Motors::sendSpeeds() {
@@ -93,31 +141,100 @@ void Motors::sendSpeeds() {
     }
     lastSendMs = now;
 
-    int32_t q0 = clamp_i32(ms_to_qpps(speeds[0]), -maxCommandQpps, maxCommandQpps);
-    int32_t q1 = clamp_i32(ms_to_qpps(speeds[1]), -maxCommandQpps, maxCommandQpps);
-    int32_t q2 = clamp_i32(ms_to_qpps(speeds[2]), -maxCommandQpps, maxCommandQpps);
-    int32_t q3 = clamp_i32(ms_to_qpps(speeds[3]), -maxCommandQpps, maxCommandQpps);
+    float command[4];
+    bool inhibited;
+
+    noInterrupts();
+
+    inhibited = motionInhibited_;
+
+    if (inhibited) {
+        // Clear anything written directly to the public speeds array.
+        speeds[0] = 0.0f;
+        speeds[1] = 0.0f;
+        speeds[2] = 0.0f;
+        speeds[3] = 0.0f;
+    }
+
+    command[0] = speeds[0];
+    command[1] = speeds[1];
+    command[2] = speeds[2];
+    command[3] = speeds[3];
+
+    interrupts();
+
+    if (inhibited) {
+        // Continuously reinforce the stopped condition.
+        rcA.SpeedAccelM1M2(ADDR_A, brakeDecelQppsPerSec, 0, 0);
+        rcB.SpeedAccelM1M2(ADDR_B, brakeDecelQppsPerSec, 0, 0);
+        return;
+    }
+
+    int32_t q0 = clamp_i32(
+        ms_to_qpps(command[0]),
+        -maxCommandQpps,
+        maxCommandQpps
+    );
+
+    int32_t q1 = clamp_i32(
+        ms_to_qpps(command[1]),
+        -maxCommandQpps,
+        maxCommandQpps
+    );
+
+    int32_t q2 = clamp_i32(
+        ms_to_qpps(command[2]),
+        -maxCommandQpps,
+        maxCommandQpps
+    );
+
+    int32_t q3 = clamp_i32(
+        ms_to_qpps(command[3]),
+        -maxCommandQpps,
+        maxCommandQpps
+    );
 
     const uint32_t a_m1 = u32bits(q0 * motorDirection[0]);
     const uint32_t a_m2 = u32bits(q1 * motorDirection[1]);
     const uint32_t b_m1 = u32bits(q2 * motorDirection[2]);
     const uint32_t b_m2 = u32bits(q3 * motorDirection[3]);
 
-    // If everything is commanded to zero, send raw zero duty instead of speed=0.
     if (q0 == 0 && q1 == 0 && q2 == 0 && q3 == 0) {
         if (closedLoopStopActive) {
-            rcA.SpeedAccelM1M2(ADDR_A, brakeDecelQppsPerSec, 0, 0);
-            rcB.SpeedAccelM1M2(ADDR_B, brakeDecelQppsPerSec, 0, 0);
+            rcA.SpeedAccelM1M2(
+                ADDR_A,
+                brakeDecelQppsPerSec,
+                0,
+                0
+            );
+
+            rcB.SpeedAccelM1M2(
+                ADDR_B,
+                brakeDecelQppsPerSec,
+                0,
+                0
+            );
         } else {
             rcA.DutyM1M2(ADDR_A, 0, 0);
             rcB.DutyM1M2(ADDR_B, 0, 0);
         }
+
         return;
     }
 
+    rcA.SpeedAccelM1M2(
+        ADDR_A,
+        accelQppsPerSec,
+        a_m1,
+        a_m2
+    );
 
-    rcA.SpeedAccelM1M2(ADDR_A, accelQppsPerSec, a_m1, a_m2);
-    rcB.SpeedAccelM1M2(ADDR_B, accelQppsPerSec, b_m1, b_m2);
+    rcB.SpeedAccelM1M2(
+        ADDR_B,
+        accelQppsPerSec,
+        b_m1,
+        b_m2
+    );
 }
 
 
@@ -210,23 +327,46 @@ void Motors::update() {
 
 // ---------- Safety ----------
 void Motors::STOP() {
-    for (float &s : speeds) {
-        s = 0.0f;
-    }
+    noInterrupts();
+
+    speeds[0] = 0.0f;
+    speeds[1] = 0.0f;
+    speeds[2] = 0.0f;
+    speeds[3] = 0.0f;
 
     closedLoopStopActive = false;
+
+    interrupts();
 
     rcA.DutyM1M2(ADDR_A, 0, 0);
     rcB.DutyM1M2(ADDR_B, 0, 0);
 }
 
 void Motors::BRAKE_STOP() {
-    for (float &s : speeds) {
-        s = 0.0f;
-    }
+    noInterrupts();
 
-    rcA.SpeedAccelM1M2(ADDR_A, brakeDecelQppsPerSec, 0, 0);
-    rcB.SpeedAccelM1M2(ADDR_B, brakeDecelQppsPerSec, 0, 0);
+    speeds[0] = 0.0f;
+    speeds[1] = 0.0f;
+    speeds[2] = 0.0f;
+    speeds[3] = 0.0f;
+
+    closedLoopStopActive = true;
+
+    interrupts();
+
+    rcA.SpeedAccelM1M2(
+        ADDR_A,
+        brakeDecelQppsPerSec,
+        0,
+        0
+    );
+
+    rcB.SpeedAccelM1M2(
+        ADDR_B,
+        brakeDecelQppsPerSec,
+        0,
+        0
+    );
 }
 
 

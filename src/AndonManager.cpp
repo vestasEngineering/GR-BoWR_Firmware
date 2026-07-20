@@ -131,9 +131,9 @@ void AndonManager::tick() {
 AndonLight::States AndonManager::compute(uint32_t /*now*/) {
   if (isEStop())               return AndonLight::RED;  
   if (hasFault())              return AndonLight::BLINK_RED;
+  if (isPausedOrJog())         return AndonLight::BLUE;
   if (isCommsLost())           return AndonLight::YELLOW;
   if (isBlockedOrStarved())    return AndonLight::BLINK_YELLOW;
-  if (isPausedOrJog())         return AndonLight::BLUE;
   if (isBatteryLow())          return AndonLight::BLINK_YELLOW;
   if (isRunning())             return AndonLight::BLINK_GREEN;
   return AndonLight::GREEN;
@@ -144,97 +144,41 @@ bool AndonManager::isEStop() const {
   return estop_.isActive();
 }
 
+bool AndonManager::motionStopRequired() const {
+    return isEStop() || hasFault();
+}
+
+void AndonManager::enforceMotionSafety() {
+    motors_.setMotionInhibited(motionStopRequired());
+}
 
 bool AndonManager::hasFault() const {
-  ::std::vector<FaultCode> tmp;
-  collectFaults(tmp);
-  return !tmp.empty();
+    if (!clamp_.isClamped()) {
+        return true;
+    }
+
+    if (battery_.isCritical(CFG.battery.critical_pct)) {
+        return true;
+    }
+
+    // Add future fault predicates here as they become available.
+    //
+    // if (actuator_.hasFault()) return true;
+    // if (motors_.driverFault(0)) return true;
+    // if (motors_.driverFault(1)) return true;
+    // if (motors_.driverFault(2)) return true;
+    // if (motors_.driverFault(3)) return true;
+
+    return false;
 }
+
 
 void AndonManager::collectFaults(std::vector<AndonManager::FaultCode>& out) const {
   out.clear();
 
-  //if (!clamp_.isClamped()) {
-  //  out.push_back(FaultCode::ClampUnclamped);
-  //}
-
-  /*
-  
-  // --- Ultrasonic Servo jam check: verify only during first few seconds of ACTIVE ---
-  {
-    // Tunables
-    const uint32_t kVerifyWindowMs   = CFG.andonMgr.ut_verify_window_ms;
-    const float    kMinOkDistance_mm = CFG.andonMgr.ut_ok_min_distance;
-    const uint16_t kConsecGoodNeeded = CFG.andonMgr.ut_good_consec;
-
-    const uint32_t now = millis();
-    const bool isActive = (ut_servo_.getState() == UltrasonicServo::ACTIVE);
-
-
-    // Handle state transitions into/out of ACTIVE
-    if (isActive) {
-      if (ut_active_since_ms_ == 0) {
-        // Transitioned to ACTIVE -> start verification window
-        ut_active_since_ms_ = now;
-        ut_verify_done_     = false;
-        ut_verify_passed_   = false;
-        ut_good_consec_     = 0;
-      }
-    } else {
-      // Not ACTIVE -> reset for next cycle
-      ut_active_since_ms_ = 0;
-      ut_verify_done_     = false;
-      ut_verify_passed_   = false;
-      ut_good_consec_     = 0;
-    }
-
-    // Only evaluate during ACTIVE
-    if (isActive) {
-      if (!ut_verify_done_) {
-        const uint32_t elapsed = now - ut_active_since_ms_;
-        // Choose one canonical distance source and validate; assume mm
-        float d = ultrasonic_.measuredDistance;
-
-        auto isValid = [](float x) { return std::isfinite(x) && x > 1.0f && x < 10000.0f; }; // 1..10000 mm plausible
-
-        if (isValid(d)) {
-          // Good sample if not "too close"
-          if (d >= kMinOkDistance_mm) {
-            if (ut_good_consec_ < 0xFFFF) ++ut_good_consec_;
-            if (ut_good_consec_ >= kConsecGoodNeeded) {
-              ut_verify_done_   = true;
-              ut_verify_passed_ = true;
-            }
-          } else {
-            // Too close -> break the streak (but keep trying until window ends)
-            ut_good_consec_ = 0;
-          }
-        }
-        // else invalid sample; ignore and keep trying
-
-        // If window ended and we never passed, flag a jam fault
-        if (!ut_verify_done_ && elapsed >= kVerifyWindowMs) {
-          ut_verify_done_   = true;
-          ut_verify_passed_ = false;
-        }
-      }
-
-      // After the window:
-      // - If we passed -> no fault for the remainder of this ACTIVE cycle.
-      // - If we failed -> raise fault once per tick (or you can latch it elsewhere).
-      if (ut_verify_done_ && !ut_verify_passed_) {
-        out.push_back(FaultCode::UltrasonicServoFault);
-      }
-    }
+  if (!clamp_.isClamped()) {
+    out.push_back(FaultCode::ClampUnclamped);
   }
-
-
-  // Ultrasonic persistent failure => fault
-  if (ultrasonic_.badReadStreak >= CFG.andonMgr.ultrasonic_bad_streak_threshold) {
-    out.push_back(FaultCode::UltrasonicPersistent);
-  }
-
-  */
   
   if (battery_.isCritical(CFG.battery.critical_pct)) {
     out.push_back(FaultCode::BatteryCritical);
@@ -327,7 +271,7 @@ bool AndonManager::isPausedOrJog() const {
   // Consider the system "paused/jog" (BLUE) while jog is active.
   // If you later add a "paused" state in motors/serial, OR it in here:
   //   return jog_.isActive() || motors_.isPaused();
-  //return jog_.isActive();
+  return jog_.isActive();
   return false;
 }
 
@@ -350,8 +294,8 @@ bool AndonManager::isRunning() const {
   // Primary signal: process state
   bool processActive = ultrasonicEnabled;
 
-  // Optional: include actuator / clamp states if they matter
-  // bool processActive = ultrasonicEnabled || actuator.isBusy() || clamp.isActive();
+  // Optional: include clamp states 
+  //bool processActive = ultrasonicEnabled || clamp_.isClamped();
 
   // Latch logic to prevent flicker during transitions
   if (processActive) {

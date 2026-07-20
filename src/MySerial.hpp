@@ -389,11 +389,37 @@ public:
 
     void updateParameters() {
         // Update motor speeds if present: speed0..speed3
-        for (int i = 0; i < 4; i++) {
+        float requestedSpeeds[4] = {
+            motors->speeds[0],
+            motors->speeds[1],
+            motors->speeds[2],
+            motors->speeds[3]
+        };
+
+        bool hasSpeedUpdate = false;
+
+        for (int i = 0; i < 4; ++i) {
             String speedKey = "speed" + String(i);
+
             if (jsonPacket.containsKey(speedKey)) {
-                motors->speeds[i] = jsonPacket[speedKey];
+                float requested = jsonPacket[speedKey] | 0.0f;
+
+                if (!isfinite(requested)) {
+                    requested = 0.0f;
+                }
+
+                requestedSpeeds[i] = requested;
+                hasSpeedUpdate = true;
             }
+        }
+
+        if (hasSpeedUpdate) {
+            motors->setSpeeds(
+                requestedSpeeds[0],
+                requestedSpeeds[1],
+                requestedSpeeds[2],
+                requestedSpeeds[3]
+            );
         }
 
         if (jsonPacket.containsKey("hb")) {
@@ -569,10 +595,10 @@ public:
             if (accelMps2 < 0.0f) accelMps2 = CFG.ultrasonic.motion_accel_mps2;
             if (decelMps2 < 0.0f) decelMps2 = CFG.ultrasonic.motion_decel_mps2;
 
-            if (ultrasonic_) {
-                ultrasonic_->maxAccelMps2 = accelMps2;
-                ultrasonic_->maxDecelMps2 = decelMps2;
-            }
+            //if (ultrasonic_) {
+            //    ultrasonic_->maxAccelMps2 = accelMps2;
+            //    ultrasonic_->maxDecelMps2 = decelMps2;
+            //}
 
             StaticJsonDocument<192> response;
             response["type"] = "ack";
@@ -886,9 +912,9 @@ void runTestActuator(const char* id, int channel, float v, float tol, unsigned l
 }
 
 void runTestUltrasonic(const char* id) {
-    int adc = analogRead(ULTRASONIC_PIN);
+    int adc = analogRead(CFG.ultrasonic.analog_pin);
     float voltage = (float(adc) * 3.1f / 1023.0f);
-    float distance = voltage * ultrasonic_->mmPerVolt + ultrasonic_->offsetDistance;
+    float distance = voltage * CFG.ultrasonic.mm_per_volt + CFG.ultrasonic.offset_mm;
 
     StaticJsonDocument<128> meas;
     meas["adc"] = adc;
