@@ -129,13 +129,14 @@ void AndonManager::tick() {
 
 // ----- Priority resolver -----
 AndonLight::States AndonManager::compute(uint32_t /*now*/) {
-  if (isEStop())               return AndonLight::RED;  
-  if (hasFault())              return AndonLight::BLINK_RED;
-  if (isPausedOrJog())         return AndonLight::BLUE;
-  if (isCommsLost())           return AndonLight::YELLOW;
-  if (isBlockedOrStarved())    return AndonLight::BLINK_YELLOW;
-  if (isBatteryLow())          return AndonLight::BLINK_YELLOW;
-  if (isRunning())             return AndonLight::BLINK_GREEN;
+  if (isEStop())                return AndonLight::RED;  
+  if (hasFault())               return AndonLight::BLINK_RED;
+  if (isJogging())              return AndonLight::BLINK_BLUE;
+  if (isActuatorDisconnected()) return AndonLight::BLUE;
+  if (isCommsLost())            return AndonLight::YELLOW;
+  if (isBlockedOrStarved())     return AndonLight::BLINK_YELLOW;
+  if (isBatteryLow())           return AndonLight::BLINK_YELLOW;
+  if (isRunning())              return AndonLight::BLINK_GREEN;
   return AndonLight::GREEN;
 }
 
@@ -267,12 +268,21 @@ bool AndonManager::isBlockedOrStarved() const {
   
 }
 
-bool AndonManager::isPausedOrJog() const {
-  // Consider the system "paused/jog" (BLUE) while jog is active.
-  // If you later add a "paused" state in motors/serial, OR it in here:
-  //   return jog_.isActive() || motors_.isPaused();
+bool AndonManager::isJogging() const
+{
   return jog_.isActive();
-  return false;
+}
+
+bool AndonManager::isActuatorDisconnected() const
+{
+  return actuator_.hasPCBFault();
+}
+
+bool AndonManager::isPausedOrJog() const
+{
+  // Used for the diagnostic payload. Both conditions represent
+  // a paused/manual operating state.
+  return isJogging() || isActuatorDisconnected();
 }
 
 bool AndonManager::isBatteryLow() const {  
@@ -292,7 +302,9 @@ bool AndonManager::isRunning() const {
   const uint32_t now = millis();
 
   // Primary signal: process state
-  bool processActive = ultrasonicEnabled;
+  const bool processActive =
+    ultrasonicEnabled &&
+    !actuator_.hasPCBFault();
 
   // Optional: include clamp states 
   //bool processActive = ultrasonicEnabled || clamp_.isClamped();

@@ -80,7 +80,6 @@ public:
 
     void loop() {
         bootAnimationStep();
-        stateMachine();
         frame();
     }
 

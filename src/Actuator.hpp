@@ -7,23 +7,22 @@
 #include <Wire.h>
 #include <Adafruit_MCP4728.h>
 #include <Adafruit_ADS1X15.h>
-#include <math.h>  // fabsf, isfinite
+#include <math.h>
 
 #define NUM_ACTUATORS 4
+#ifndef ACTUATOR_I2C_DEBUG
+#define ACTUATOR_I2C_DEBUG 0
+#endif
 
 class ActuatorControl {
 public:
     Stream* io = nullptr;
     explicit ActuatorControl(Stream& ioRef) : io(&ioRef) {}
 
-    // Hardware drivers
     Adafruit_MCP4728 dac;
     Adafruit_ADS1115 adc;
 
-    // Commanded positions (0..maxCommandVoltage)
     float actuatorPositions[NUM_ACTUATORS] = {0, 0, 0, 0};
-
-    // Feedback voltages (0..maxFeedbackVoltage)
     float feedbackSignals[NUM_ACTUATORS] = {0, 0, 0, 0};
 
     enum States { SET_POSITION, READ_FEEDBACK };
@@ -32,345 +31,404 @@ public:
     StaticJsonDocument<32> json;
     char packet[32];
 
-    // ----- Fault flags -----
-    // When true: do not touch I2C DAC/ADC (prevents the whole firmware from blocking)
     bool pcbFault_ = false;
-
-    // Indicates we detected a runtime I2C disconnect/fault and latched it
     bool i2cFaultLatched_ = false;
 
-    // per-channel jam latch
     bool  jammed[NUM_ACTUATORS] = {false, false, false, false};
     float lastErrV[NUM_ACTUATORS] = {0, 0, 0, 0};
-
-    // Endpoint jam detection internal state
     bool     lastRequestedActive[NUM_ACTUATORS] = {false, false, false, false};
-    bool     checkArmed[NUM_ACTUATORS]          = {false, false, false, false};
-    bool     expectedActive[NUM_ACTUATORS]      = {false, false, false, false};
-    uint32_t checkAtMs[NUM_ACTUATORS]           = {0, 0, 0, 0};
+    bool     checkArmed[NUM_ACTUATORS] = {false, false, false, false};
+    bool     expectedActive[NUM_ACTUATORS] = {false, false, false, false};
+    uint32_t checkAtMs[NUM_ACTUATORS] = {0, 0, 0, 0};
 
-    // ---- Runtime I2C recovery ----
-    uint32_t nextReinitAttemptMs_ = 0;
-    static constexpr uint32_t REINIT_PERIOD_MS = 5000;
+    static constexpr uint8_t DAC_ADDR = 0x60;
+    static constexpr uint8_t ADC_ADDR = 0x48;
+    static constexpr uint32_t REINIT_PERIOD_MS = 500;
+    static constexpr uint32_t WIRE_TIMEOUT_US = 5000;
+    static constexpr uint32_t ADC_CONVERSION_US = 9000; // ADS1115 at 128 SPS plus margin.
 
-    // If your hardware uses different addresses, change these:
-    static constexpr uint8_t DAC_ADDR = 0x60; // MCP4728 default
-    static constexpr uint8_t ADC_ADDR = 0x48; // ADS1115 default
-
-    // ----- Public status API -----
     bool hasPCBFault() const { return pcbFault_; }
-
     bool hasFault() const {
         if (pcbFault_) return true;
-        for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) {
-            if (jammed[i]) return true;
-        }
+        for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) if (jammed[i]) return true;
         return false;
     }
-
     uint8_t jamMask() const {
         uint8_t m = 0;
-        for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) {
-            if (jammed[i]) m |= (1u << i);
-        }
+        for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) if (jammed[i]) m |= (1u << i);
         return m;
     }
-
     void clearJammed(uint8_t i) { if (i < NUM_ACTUATORS) jammed[i] = false; }
-    void clearAllJammed()       { for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) jammed[i] = false; }
+    void clearAllJammed() { for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) jammed[i] = false; }
 
-    // ------------------------------------------------------------
-    // Setup
-    // ------------------------------------------------------------
     void setup() {
         Wire.begin();
+        configureWireTimeout_();
 
-        // Prevent I2C lockups from freezing the entire firmware loop. [1](https://docs.arduino.cc/language-reference/en/functions/communication/wire/setWireTimeout/)
-        #if defined(WIRE_HAS_TIMEOUT)
-          Wire.setWireTimeout(25000 /*us*/, true /*reset_on_timeout*/);
-        #endif
+        emitStatus_("wire_configured");
 
-        io->println("{\"type\":\"status\",\"module\":\"actuator\",\"msg\":\"initializing\"}");
+        const bool dacOk = dac.begin(DAC_ADDR, &Wire);
+        const bool adcOk = i2cPing_(ADC_ADDR); // ADS1115 requires no initialization sequence.
 
-        bool dacOk = dac.begin();
-        if (!dacOk) {
-            pcbFault_ = true;
-            io->println("{\"type\":\"status\",\"module\":\"actuator\",\"status\":\"mcp4728_init_failed\",\"fault\":\"pcb\"}");
-        } else {
-            io->println("{\"type\":\"status\",\"module\":\"actuator\",\"status\":\"mcp4728_init_ok\"}");
-        }
+        if (!dacOk) emitStatus_("mcp4728_init_failed", "pcb");
+        else emitStatus_("mcp4728_init_ok");
+        if (!adcOk) emitStatus_("ads1115_init_failed", "pcb");
+        else emitStatus_("ads1115_init_ok");
 
-        bool adcOk = adc.begin();
-        if (!adcOk) {
-            pcbFault_ = true;
-            io->println("{\"type\":\"status\",\"module\":\"actuator\",\"status\":\"ads1115_init_failed\",\"fault\":\"pcb\"}");
-        } else {
-            io->println("{\"type\":\"status\",\"module\":\"actuator\",\"status\":\"ads1115_init_ok\"}");
-        }
-
+        pcbFault_ = !(dacOk && adcOk);
+        i2cFaultLatched_ = pcbFault_;
+        if (pcbFault_) nextReinitAttemptMs_ = millis() + REINIT_PERIOD_MS;
+        resetAdcSequencer_();
         state = SET_POSITION;
     }
 
-    // ------------------------------------------------------------
-    // PUBLIC: writeDAC / readADC (kept public because MySerial uses them)
-    // These are SAFE: they latch faults and become no-ops when I2C is gone.
-    // ------------------------------------------------------------
     void writeDAC(uint8_t channel, float voltage) {
-        const float v = constrain(voltage, 0.0f, CFG.actuator.maxCommandVoltage);
-        const uint16_t dacValue = (uint16_t)((v / CFG.actuator.maxCommandVoltage) * 4095.0f);
-
-        MCP4728_channel_t channelEnum;
-        switch (channel) {
-            case 0: channelEnum = MCP4728_CHANNEL_A; break;
-            case 1: channelEnum = MCP4728_CHANNEL_B; break;
-            case 2: channelEnum = MCP4728_CHANNEL_C; break;
-            case 3: channelEnum = MCP4728_CHANNEL_D; break;
-            default: {
-                StaticJsonDocument<96> doc;
-                doc["type"]   = "error";
-                doc["module"] = "actuator";
-                doc["error"]  = "invalid_dac_channel";
-                doc["channel"] = channel;
-                serializeJson(doc, *io);
-                io->println();
-                return;
-            }
+        if (channel >= NUM_ACTUATORS) {
+            emitError_("invalid_dac_channel", channel);
+            return;
         }
-
-        // If we latched a fault, never touch I2C
         if (pcbFault_) return;
 
-        // setChannelValue returns true/false depending on I2C success [2](https://adafruit.github.io/Adafruit_MCP4728/html/class_adafruit___m_c_p4728.html)
-        const bool ok = dac.setChannelValue(
-            channelEnum,
-            dacValue,
-            MCP4728_VREF_VDD,
-            MCP4728_GAIN_1X,
-            MCP4728_PD_MODE_NORMAL
-        );
-
-        if (!ok) {
-            latchI2CFault_("dac_setChannelValue", channel);
+        MCP4728_channel_t c = MCP4728_CHANNEL_A;
+        switch (channel) {
+            case 0: c = MCP4728_CHANNEL_A; break;
+            case 1: c = MCP4728_CHANNEL_B; break;
+            case 2: c = MCP4728_CHANNEL_C; break;
+            case 3: c = MCP4728_CHANNEL_D; break;
         }
+
+        const float v = constrain(voltage, 0.0f, CFG.actuator.maxCommandVoltage);
+        const uint16_t value = static_cast<uint16_t>((v / CFG.actuator.maxCommandVoltage) * 4095.0f);
+
+        clearWireTimeout_();
+        emitI2CDebug_("before", "dac_write", channel);
+        const bool ok = dac.setChannelValue(c, value, MCP4728_VREF_VDD,
+                                            MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL);
+        emitI2CDebug_("after", "dac_write", channel);
+
+        if (!ok || consumeWireTimeout_()) latchI2CFault_("dac_write", channel);
     }
 
+    // Compatibility API. The normal state machine does NOT call this blocking wrapper.
     float readADC(uint8_t channel) {
-        if (pcbFault_) return 0.0f;
-
-        // If ADC is missing (runtime disconnect), latch and bail fast
-        if (!i2cPing_(ADC_ADDR)) {
-            latchI2CFault_("adc_ping_failed", channel);
-            return 0.0f;
-        }
-
-        int16_t rawValue = adc.readADC_SingleEnded(channel);
-
-        float voltage = (rawValue / 32767.0f) * CFG.actuator.maxFeedbackVoltage;
-        if (voltage < 0.0f) voltage = 0.0f;
-        if (voltage > CFG.actuator.maxFeedbackVoltage) voltage = CFG.actuator.maxFeedbackVoltage;
+        float voltage = 0.0f;
+        if (!readADCBounded_(channel, voltage)) return 0.0f;
         return voltage;
     }
 
-    // ------------------------------------------------------------
-    // Core loop state machine
-    // ------------------------------------------------------------
     void stateMachine() {
-        // If cable is unplugged during runtime, latch fault to keep robot responsive.
-        // Periodically attempt recovery if cable returns.
-        tryReinitIfNeeded_();
-
-        switch (state) {
-            case SET_POSITION: {
-                const uint32_t now = millis();
-
-                for (uint8_t i = 0; i < NUM_ACTUATORS; i++) {
-                    const float cmdV = actuatorPositions[i];
-                    writeDAC(i, cmdV);
-
-                    const bool reqActivate   = (cmdV >= CFG.actuator.activate_cmd_min_v);
-                    const bool reqDeactivate = (cmdV <= CFG.actuator.deactivate_cmd_max_v);
-
-                    if (reqActivate && (lastRequestedActive[i] != true)) {
-                        lastRequestedActive[i] = true;
-                        expectedActive[i]      = true;
-                        checkAtMs[i]           = now + CFG.actuator.settle_ms;
-                        checkArmed[i]          = true;
-                        jammed[i]              = false;
-                    } else if (reqDeactivate && (lastRequestedActive[i] != false)) {
-                        lastRequestedActive[i] = false;
-                        expectedActive[i]      = false;
-                        checkAtMs[i]           = now + CFG.actuator.settle_ms;
-                        checkArmed[i]          = true;
-                        jammed[i]              = false;
-                    }
-                }
-
-                state = READ_FEEDBACK;
-            } break;
-
-            case READ_FEEDBACK: {
-                const uint32_t now = millis();
-
-                for (uint8_t i = 0; i < NUM_ACTUATORS; i++) {
-                    feedbackSignals[i] = readADC(i);
-
-                    if (checkArmed[i] && ((int32_t)(now - checkAtMs[i]) >= 0)) {
-                        if (expectedActive[i]) {
-                            lastErrV[i] = (CFG.actuator.active_fb_min_v - feedbackSignals[i]);
-                            if (feedbackSignals[i] < CFG.actuator.active_fb_min_v) {
-                                jammed[i] = true;
-                            }
-                        } else {
-                            lastErrV[i] = (feedbackSignals[i] - CFG.actuator.inactive_fb_max_v);
-                            if (feedbackSignals[i] > CFG.actuator.inactive_fb_max_v) {
-                                jammed[i] = true;
-                            }
-                        }
-                        checkArmed[i] = false;
-                    }
-                }
-
-                state = SET_POSITION;
-            } break;
+        if (pcbFault_) {
+            tryReinitIfNeeded_();
+            return;
         }
+
+        if (state == SET_POSITION) {
+            const uint32_t now = millis();
+            for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) {
+                const float cmdV = actuatorPositions[i];
+                writeDAC(i, cmdV);
+                if (pcbFault_) return;
+                armJamCheck_(i, cmdV, now);
+            }
+            resetAdcSequencer_();
+            state = READ_FEEDBACK;
+            return;
+        }
+
+        serviceAdcSequencer_(); 
     }
 
-    // ------------------------------------------------------------
-    // Debug output
-    // ------------------------------------------------------------
     void debugOutput() {
-        for (uint8_t i = 0; i < NUM_ACTUATORS; i++) {
+        for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) {
             StaticJsonDocument<192> doc;
-            doc["type"]       = "actuator_debug";
-            doc["channel"]    = i;
-            doc["cmd_V"]      = actuatorPositions[i];
-            doc["fb_V"]       = feedbackSignals[i];
-            doc["jam"]        = jammed[i];
+            doc["type"] = "actuator_debug";
+            doc["channel"] = i;
+            doc["cmd_V"] = actuatorPositions[i];
+            doc["fb_V"] = feedbackSignals[i];
+            doc["jam"] = jammed[i];
             doc["last_err_V"] = lastErrV[i];
-            doc["pcbFault"]   = pcbFault_;
-            doc["i2cLatch"]   = i2cFaultLatched_;
-            serializeJson(doc, *io);
-            io->println();
+            doc["pcbFault"] = pcbFault_;
+            doc["i2cLatch"] = i2cFaultLatched_;
+            serializeJson(doc, *io); io->println();
         }
     }
 
-    // ------------------------------------------------------------
-    // Self test
-    // ------------------------------------------------------------
     void runSelfTest() {
-        {
-            StaticJsonDocument<96> doc;
-            doc["type"]  = "actuator_self_test";
-            doc["phase"] = "start";
-            serializeJson(doc, *io);
-            io->println();
-        }
-
-        for (uint8_t i = 0; i < NUM_ACTUATORS; i++) {
-            float testVoltage = 2.5f;
-            actuatorPositions[i] = testVoltage;
-            writeDAC(i, testVoltage);
+        emitSelfTest_("start");
+        for (uint8_t i = 0; i < NUM_ACTUATORS && !pcbFault_; ++i) {
+            actuatorPositions[i] = 2.5f;
+            writeDAC(i, 2.5f);
             delay(500);
-
-            float feedback = readADC(i);
-            feedbackSignals[i] = feedback;
+            float fb = 0.0f;
+            const bool ok = readADCBounded_(i, fb);
+            if (ok) feedbackSignals[i] = fb;
 
             StaticJsonDocument<160> doc;
-            doc["type"]       = "actuator_self_test";
-            doc["phase"]      = "sample";
-            doc["channel"]    = i;
-            doc["command_V"]  = testVoltage;
-            doc["feedback_V"] = feedback;
-            serializeJson(doc, *io);
-            io->println();
+            doc["type"] = "actuator_self_test";
+            doc["phase"] = "sample";
+            doc["channel"] = i;
+            doc["command_V"] = 2.5f;
+            doc["feedback_V"] = fb;
+            doc["ok"] = ok;
+            serializeJson(doc, *io); io->println();
 
             actuatorPositions[i] = 0.0f;
             writeDAC(i, 0.0f);
             delay(250);
         }
-
-        {
-            StaticJsonDocument<96> doc;
-            doc["type"]  = "actuator_self_test";
-            doc["phase"] = "complete";
-            serializeJson(doc, *io);
-            io->println();
-        }
+        emitSelfTest_(pcbFault_ ? "aborted" : "complete");
     }
 
-    // ---- Mapping-derived expected feedback ----
-    float expectedFeedbackMapped(uint8_t /*channel*/, float cmdV) const {
-        float expFb = CFG.actuator.fb_map_m * cmdV + CFG.actuator.fb_map_b;
-        if (expFb < 0.0f) expFb = 0.0f;
-        if (expFb > CFG.actuator.maxFeedbackVoltage) expFb = CFG.actuator.maxFeedbackVoltage;
-        return expFb;
+    float expectedFeedbackMapped(uint8_t, float cmdV) const {
+        return constrain(CFG.actuator.fb_map_m * cmdV + CFG.actuator.fb_map_b,
+                         0.0f, CFG.actuator.maxFeedbackVoltage);
     }
 
-    // Averaging helper
     float readADC_Avg(uint8_t channel, int samples = 5, int sampleDelayMs = 3) {
-        if (pcbFault_) return 0.0f;
-        if (samples <= 1) return readADC(channel);
-
+        if (pcbFault_ || samples <= 0) return 0.0f;
         float acc = 0.0f;
-        for (int i = 0; i < samples; ++i) {
-            acc += readADC(channel);
+        int good = 0;
+        for (int i = 0; i < samples && !pcbFault_; ++i) {
+            float sample = 0.0f;
+            if (!readADCBounded_(channel, sample)) break;
+            acc += sample; ++good;
             if (sampleDelayMs > 0) delay(sampleDelayMs);
         }
+        return good ? constrain(acc / good, 0.0f, CFG.actuator.maxFeedbackVoltage) : 0.0f;
+    }
 
-        float v = acc / samples;
-        if (v < 0.0f) v = 0.0f;
-        if (v > CFG.actuator.maxFeedbackVoltage) v = CFG.actuator.maxFeedbackVoltage;
-        return v;
+    void emitI2CDebug_(const char* phase, const char* operation, int channel = -1) {
+#if ACTUATOR_I2C_DEBUG
+        StaticJsonDocument<160> doc;
+        doc["type"] = "debug"; doc["module"] = "actuator";
+        doc["phase"] = phase; doc["operation"] = operation; doc["time_ms"] = millis();
+        if (channel >= 0) doc["channel"] = channel;
+        serializeJson(doc, *io); io->println();
+#else
+        (void)phase; (void)operation; (void)channel;
+#endif
     }
 
 private:
-    // ------------------------------------------------------------
-    // Runtime I2C fault / recovery helpers
-    // ------------------------------------------------------------
-    void latchI2CFault_(const char* where, int detail = -1) {
-        pcbFault_ = true;       // disables all I2C interaction in writeDAC/readADC
-        i2cFaultLatched_ = true;
-        nextReinitAttemptMs_ = millis() + REINIT_PERIOD_MS;
+    enum class AdcPhase : uint8_t { START, WAIT, READ };
+    AdcPhase adcPhase_ = AdcPhase::START;
+    uint8_t adcChannel_ = 0;
+    uint32_t adcReadyUs_ = 0;
+    uint32_t nextReinitAttemptMs_ = 0;
 
-        StaticJsonDocument<160> doc;
-        doc["type"]   = "status";
-        doc["module"] = "actuator";
-        doc["fault"]  = "i2c_runtime_disconnect";
-        doc["where"]  = where;
-        if (detail >= 0) doc["detail"] = detail;
-        serializeJson(doc, *io);
-        io->println();
+    static constexpr uint8_t ADS_REG_CONVERSION = 0x00;
+    static constexpr uint8_t ADS_REG_CONFIG = 0x01;
+    static constexpr uint16_t ADS_OS_SINGLE = 0x8000;
+    static constexpr uint16_t ADS_PGA_6_144V = 0x0000;
+    static constexpr uint16_t ADS_MODE_SINGLE = 0x0100;
+    static constexpr uint16_t ADS_DR_128SPS = 0x0080;
+    static constexpr uint16_t ADS_COMP_DISABLE = 0x0003;
+
+    void configureWireTimeout_() {
+#if defined(WIRE_HAS_TIMEOUT)
+        Wire.setWireTimeout(WIRE_TIMEOUT_US, true);
+        Wire.clearWireTimeoutFlag();
+#endif
+    }
+    void clearWireTimeout_() {
+#if defined(WIRE_HAS_TIMEOUT)
+        Wire.clearWireTimeoutFlag();
+#endif
+    }
+    bool consumeWireTimeout_() {
+#if defined(WIRE_HAS_TIMEOUT)
+        if (Wire.getWireTimeoutFlag()) {
+            Wire.clearWireTimeoutFlag();
+            return true;
+        }
+#endif
+        return false;
     }
 
-    bool i2cPing_(uint8_t addr) {
-        Wire.beginTransmission(addr);
-        uint8_t err = Wire.endTransmission();
-        return (err == 0);
+    bool writeRegister16_(uint8_t reg, uint16_t value) {
+        clearWireTimeout_();
+        Wire.beginTransmission(ADC_ADDR);
+        Wire.write(reg);
+        Wire.write(static_cast<uint8_t>(value >> 8));
+        Wire.write(static_cast<uint8_t>(value & 0xFF));
+        const uint8_t err = Wire.endTransmission(true);
+        return err == 0 && !consumeWireTimeout_();
     }
 
-    void tryReinitIfNeeded_() {
-        if (!pcbFault_) return;
+    bool readRegister16_(uint8_t reg, uint16_t& value) {
+        clearWireTimeout_();
+        Wire.beginTransmission(ADC_ADDR);
+        Wire.write(reg);
+        const uint8_t err = Wire.endTransmission(false);
+        if (err != 0 || consumeWireTimeout_()) return false;
 
-        const int32_t dt = (int32_t)(millis() - nextReinitAttemptMs_);
-        if (dt < 0) return;
+        clearWireTimeout_();
+        const uint8_t count = Wire.requestFrom(ADC_ADDR, static_cast<uint8_t>(2), static_cast<uint8_t>(true));
+        if (count != 2 || consumeWireTimeout_()) {
+            while (Wire.available()) (void)Wire.read();
+            return false;
+        }
+        const uint8_t msb = static_cast<uint8_t>(Wire.read());
+        const uint8_t lsb = static_cast<uint8_t>(Wire.read());
+        value = (static_cast<uint16_t>(msb) << 8) | lsb;
+        return true;
+    }
 
-        // Only attempt reinit if devices respond
-        if (!i2cPing_(DAC_ADDR) || !i2cPing_(ADC_ADDR)) {
-            nextReinitAttemptMs_ = millis() + REINIT_PERIOD_MS;
+    uint16_t adcConfig_(uint8_t channel) const {
+        const uint16_t mux = static_cast<uint16_t>(0x4000u + (static_cast<uint16_t>(channel) << 12));
+        return ADS_OS_SINGLE | mux | ADS_PGA_6_144V | ADS_MODE_SINGLE |
+               ADS_DR_128SPS | ADS_COMP_DISABLE;
+    }
+
+    void resetAdcSequencer_() {
+        adcPhase_ = AdcPhase::START;
+        adcChannel_ = 0;
+        adcReadyUs_ = 0;
+    }
+
+    void serviceAdcSequencer_() {
+        if (adcChannel_ >= NUM_ACTUATORS) {
+            state = SET_POSITION;
+            resetAdcSequencer_();
             return;
         }
 
-        bool dacOk = dac.begin();
-        bool adcOk = adc.begin();
+        switch (adcPhase_) {
+            case AdcPhase::START:
+                emitI2CDebug_("before", "adc_start", adcChannel_);
+                if (!writeRegister16_(ADS_REG_CONFIG, adcConfig_(adcChannel_))) {
+                    latchI2CFault_("adc_start", adcChannel_);
+                    return;
+                }
+                emitI2CDebug_("after", "adc_start", adcChannel_);
+                adcReadyUs_ = micros() + ADC_CONVERSION_US;
+                adcPhase_ = AdcPhase::WAIT;
+                return;
 
-        if (dacOk && adcOk) {
-            pcbFault_ = false;
-            i2cFaultLatched_ = false;
-            io->println("{\"type\":\"status\",\"module\":\"actuator\",\"status\":\"i2c_recovered\"}");
-        } else {
-            pcbFault_ = true;
-            nextReinitAttemptMs_ = millis() + REINIT_PERIOD_MS;
+            case AdcPhase::WAIT:
+                if (static_cast<int32_t>(micros() - adcReadyUs_) >= 0) adcPhase_ = AdcPhase::READ;
+                return;
+
+            case AdcPhase::READ: {
+                uint16_t rawBits = 0;
+                emitI2CDebug_("before", "adc_result", adcChannel_);
+                if (!readRegister16_(ADS_REG_CONVERSION, rawBits)) {
+                    latchI2CFault_("adc_result", adcChannel_);
+                    return;
+                }
+                emitI2CDebug_("after", "adc_result", adcChannel_);
+                feedbackSignals[adcChannel_] = rawToVoltage_(static_cast<int16_t>(rawBits));
+                evaluateJam_(adcChannel_, millis());
+                ++adcChannel_;
+                adcPhase_ = AdcPhase::START;
+                return;
+            }
         }
+    }
+
+    bool readADCBounded_(uint8_t channel, float& voltage) {
+        voltage = 0.0f;
+        if (channel >= NUM_ACTUATORS || pcbFault_) return false;
+        if (!writeRegister16_(ADS_REG_CONFIG, adcConfig_(channel))) {
+            latchI2CFault_("adc_start_sync", channel); return false;
+        }
+        delayMicroseconds(ADC_CONVERSION_US);
+        uint16_t rawBits = 0;
+        if (!readRegister16_(ADS_REG_CONVERSION, rawBits)) {
+            latchI2CFault_("adc_result_sync", channel); return false;
+        }
+        voltage = rawToVoltage_(static_cast<int16_t>(rawBits));
+        return true;
+    }
+
+    float rawToVoltage_(int16_t raw) const {
+        float v = (static_cast<float>(raw) / 32767.0f) * CFG.actuator.maxFeedbackVoltage;
+        return constrain(v, 0.0f, CFG.actuator.maxFeedbackVoltage);
+    }
+
+    void armJamCheck_(uint8_t i, float cmdV, uint32_t now) {
+        const bool activate = cmdV >= CFG.actuator.activate_cmd_min_v;
+        const bool deactivate = cmdV <= CFG.actuator.deactivate_cmd_max_v;
+        if (activate && !lastRequestedActive[i]) {
+            lastRequestedActive[i] = true; expectedActive[i] = true;
+        } else if (deactivate && lastRequestedActive[i]) {
+            lastRequestedActive[i] = false; expectedActive[i] = false;
+        } else return;
+        checkAtMs[i] = now + CFG.actuator.settle_ms;
+        checkArmed[i] = true;
+        jammed[i] = false;
+    }
+
+    void evaluateJam_(uint8_t i, uint32_t now) {
+        if (!checkArmed[i] || static_cast<int32_t>(now - checkAtMs[i]) < 0) return;
+        if (expectedActive[i]) {
+            lastErrV[i] = CFG.actuator.active_fb_min_v - feedbackSignals[i];
+            jammed[i] = feedbackSignals[i] < CFG.actuator.active_fb_min_v;
+        } else {
+            lastErrV[i] = feedbackSignals[i] - CFG.actuator.inactive_fb_max_v;
+            jammed[i] = feedbackSignals[i] > CFG.actuator.inactive_fb_max_v;
+        }
+        checkArmed[i] = false;
+    }
+
+    bool i2cPing_(uint8_t addr) {
+        clearWireTimeout_();
+        Wire.beginTransmission(addr);
+        const uint8_t err = Wire.endTransmission(true);
+        return err == 0 && !consumeWireTimeout_();
+    }
+
+    void latchI2CFault_(const char* where, int detail = -1) {
+        pcbFault_ = true;
+        i2cFaultLatched_ = true;
+        nextReinitAttemptMs_ = millis() + REINIT_PERIOD_MS;
+        resetAdcSequencer_();
+        StaticJsonDocument<160> doc;
+        doc["type"] = "status"; doc["module"] = "actuator";
+        doc["fault"] = "i2c_runtime_disconnect"; doc["where"] = where;
+        if (detail >= 0) doc["detail"] = detail;
+        serializeJson(doc, *io); io->println();
+    }
+
+    void tryReinitIfNeeded_() {
+        const uint32_t now = millis();
+        if (static_cast<int32_t>(now - nextReinitAttemptMs_) < 0) return;
+        nextReinitAttemptMs_ = now + REINIT_PERIOD_MS;
+
+        // Reapply timeout because reset-on-timeout may have reset the peripheral.
+        Wire.begin();
+        configureWireTimeout_();
+
+        if (!i2cPing_(DAC_ADDR) || !i2cPing_(ADC_ADDR)) return;
+        if (!dac.begin(DAC_ADDR, &Wire)) return;
+
+        pcbFault_ = false;
+        i2cFaultLatched_ = false;
+        state = SET_POSITION;
+        resetAdcSequencer_();
+        emitStatus_("i2c_recovered");
+    }
+
+    void emitStatus_(const char* status, const char* fault = nullptr) {
+        StaticJsonDocument<160> doc;
+        doc["type"] = "status"; doc["module"] = "actuator"; doc["status"] = status;
+        if (fault) doc["fault"] = fault;
+#if defined(WIRE_HAS_TIMEOUT)
+        doc["wire_timeout_us"] = WIRE_TIMEOUT_US;
+#else
+        doc["wire_timeout"] = "unsupported";
+#endif
+        serializeJson(doc, *io); io->println();
+    }
+    void emitError_(const char* error, int detail) {
+        StaticJsonDocument<96> doc;
+        doc["type"] = "error"; doc["module"] = "actuator"; doc["error"] = error; doc["detail"] = detail;
+        serializeJson(doc, *io); io->println();
+    }
+    void emitSelfTest_(const char* phase) {
+        StaticJsonDocument<96> doc;
+        doc["type"] = "actuator_self_test"; doc["phase"] = phase;
+        serializeJson(doc, *io); io->println();
     }
 };
 

@@ -32,6 +32,8 @@ UltrasonicServo ultrasonicServo;
 
 #include <Actuator.hpp>
 ActuatorControl actuator(myUART0);
+bool actuatorWasConnected = false;
+bool actuatorDisconnectActive = false;
 
 #include <AndonLight.hpp>
 AndonLight andonLight(myUART0);
@@ -174,7 +176,11 @@ void setup() {
   mySerial.attachUltrasonicServo(ultrasonicServo);
   ultrasonic.attachMotors(motors);
   ultrasonicServo.setup();
+
   actuator.setup ();
+  actuatorWasConnected = !actuator.hasPCBFault();
+  actuatorDisconnectActive = !actuatorWasConnected;
+
   jogControl.setup();
   mySerial.attachJogControl(jogControl);
   batteryMonitor.setup();
@@ -201,33 +207,104 @@ void setup() {
   M7Timer.attachInterruptInterval(100, m7timer);
 }
 
-void loop() {
-  
-  if (andonLight.booting) {
-    motors.setMotionInhibited(true);
+void updateActuatorConnectionMode()
+{
+    const bool actuatorConnected = !actuator.hasPCBFault();
+
+    // Connected -> disconnected transition
+    if (actuatorWasConnected && !actuatorConnected) {
+        // Record whether the ultrasonic process owned the motors before
+        // changing its state.
+        const bool ultrasonicWasActive =
+            ultrasonicEnabled &&
+            !actuatorDisconnectActive;
+
+        // A disconnect terminates the ultrasonic process rather than
+        // temporarily pausing it.
+        ultrasonicEnabled = false;
+        actuatorDisconnectActive = true;
+
+        // Clear the final command issued by ultrasonic control.
+        if (ultrasonicWasActive) {
+            motors.BRAKE_STOP();
+        }
+
+        ultrasonicServo.deactivate();
+        ultrasonic.servoSettleDelay = 0;
+
+        myUART0.println(
+            "{\"type\":\"status\","
+            "\"module\":\"motion\","
+            "\"status\":\"ultrasonic_stopped\","
+            "\"reason\":\"actuator_dac_adc_disconnected\"}"
+        );
+    }
+
+    // Disconnected -> connected transition
+    if (!actuatorWasConnected && actuatorConnected) {
+        // The hardware is available again, but the ultrasonic process
+        // remains disabled. A new operator command is required to restart it.
+        actuatorDisconnectActive = false;
+
+        // No BRAKE_STOP() is needed here because the ultrasonic process
+        // is disabled and must not take ownership from JogControl.
+        myUART0.println(
+            "{\"type\":\"status\","
+            "\"module\":\"motion\","
+            "\"status\":\"actuator_dac_adc_reconnected\","
+            "\"ultrasonic\":\"stopped\"}"
+        );
+    }
+
+    actuatorWasConnected = actuatorConnected;
+}
+
+void loop()
+{
+    if (andonLight.booting) {
+        motors.setMotionInhibited(true);
+        andonLight.loop();
+        return;
+    }
+
     andonLight.loop();
-    return;
-  }
-  andonLight.loop();
-  estop.tick();
-  clamp.tick();
-  batteryMonitor.stateMachine();
-  andonMgr.enforceMotionSafety();
-  mySerial.stateMachine();
-  jogControl.update();
+    estop.tick();
+    clamp.tick();
+    batteryMonitor.stateMachine();
 
-  if (ultrasonicEnabled) {
-      ultrasonicServo.activate();  // Servo active when ultrasonic is enabled
-      ultrasonic.stateMachine();
-      //myUART0.print("Ultrasonic distance: ");
-      //myUART0.println(ultrasonic.measuredDistance);
-  } else {
-      ultrasonicServo.deactivate(); // Servo inactive when ultrasonic is disabled
-      ultrasonic.servoSettleDelay = 0;
-  };
+    // Process incoming commands.
+    mySerial.stateMachine();
 
-  actuator.stateMachine();
-  andonMgr.enforceMotionSafety();
-  motors.update();
-  andonMgr.tick();
+    // Check actuator DAC/ADC connection before choosing which controller
+    // is allowed to issue motor commands.
+    actuator.stateMachine();
+    updateActuatorConnectionMode();
+
+    // Apply hard safety conditions before accepting motion commands.
+    andonMgr.enforceMotionSafety();
+
+    const bool actuatorConnected = !actuator.hasPCBFault();
+
+    if (
+        ultrasonicEnabled &&
+        actuatorConnected &&
+        !actuatorDisconnectActive
+    ) {
+        // DAC and ADC are connected:
+        // ultrasonic control owns the motor command.
+        ultrasonicServo.activate();
+        ultrasonic.stateMachine();
+    } else {
+        // DAC/ADC disconnected, or ultrasonic process not enabled:
+        // ultrasonic control does not run and jog owns the command.
+        ultrasonicServo.deactivate();
+        ultrasonic.servoSettleDelay = 0;
+
+        jogControl.update();
+    }
+
+    andonMgr.enforceMotionSafety();
+
+    motors.update();
+    andonMgr.tick();
 }

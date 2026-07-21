@@ -62,6 +62,8 @@ private:
   bool hasFault() const;
   bool isCommsLost() const;
   bool isBlockedOrStarved() const;
+  bool isJogging() const;
+  bool isActuatorDisconnected() const;
   bool isPausedOrJog() const;
   bool isBatteryLow() const;
   bool isRunning() const;
