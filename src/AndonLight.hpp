@@ -1,18 +1,16 @@
 #ifndef ANDON_LIGHT
 #define ANDON_LIGHT
 
+#include <ArduinoJson.h>
 #include <Arduino.h>
+#include <Wire.h>
 #include <seesaw_neopixel.h>
 #include <math.h>
-#include "Config.hpp"   // <-- central configuration
+#include "Config.hpp"
 
 class AndonLight {
 public:
-
-    Stream* io = nullptr;
-    AndonLight(Stream& ioRef) : io(&ioRef) {}
-
-    enum States {
+    enum States : uint8_t {
         GREEN,
         YELLOW,
         BLUE,
@@ -24,259 +22,547 @@ public:
         BLINK_RED
     };
 
-    States state;
+    explicit AndonLight(Stream& ioRef) : io(&ioRef) {}
+
+    Stream* io = nullptr;
+
+    // Public status retained for compatibility with existing code.
+    States state = OFF;
     bool blinkStatus = false;
-    unsigned long lastBlinkTime = 0;
-
-    // Frame cap to avoid I2C/Seesaw shimmer
-    unsigned long lastFrameMs = 0;
-
-    // Time-based fade
-    bool     fading = false;
-    unsigned long fadeStartMs = 0;
-    uint16_t fadeDurMs   = 0;          // will be set from CFG.andon.fade_ms at setup and on fades
-    uint8_t  curR=0, curG=0, curB=0;  // current applied color
-    uint8_t  tgtR=0, tgtG=0, tgtB=0;  // fade target color
-    uint8_t  srcR=0, srcG=0, srcB=0;  // fade source color
-
-    // Construct with placeholder length/pin; configure real values at setup()
-    seesaw_NeoPixel strip = seesaw_NeoPixel(1 /*placeholder len*/,
-                                            15 /*placeholder pin*/,
-                                            NEO_GRB + NEO_KHZ800,
-                                            &Wire1);
-
-    // Boot animation state
     bool booting = true;
-    unsigned long bootStartTime = 0;
-    unsigned long lastBootStepTime = 0;
-    uint16_t bootStep = 0;
+    bool hardwareOk = false;
+
+    // Construct with placeholders; setup() applies configured length/type.
+    seesaw_NeoPixel strip = seesaw_NeoPixel(
+        1,
+        15,
+        NEO_GRB + NEO_KHZ800,
+        &Wire1
+    );
 
     void setup() {
-        io->println("{\"type\":\"status\",\"module\":\"andon\",\"msg\":\"initializing\"}");
+        io->println(
+            F("{\"type\":\"status\",\"module\":\"andon\",\"msg\":\"initializing\"}")
+        );
 
+        Wire1.begin();
+        configureWireTimeout_();
 
-        // Initialize seesaw NeoPixel driver at configured I2C address
-        if (!strip.begin(CFG.andon.neo_addr)) {
-            io->println("{\"type\":\"error\",\"module\":\"andon\",\"error\":\"seesaw_not_found\"}");
-
-            while (1) delay(10);
+        if (!initializeHardware_()) {
+            enterHeadlessMode_("seesaw_not_found");
+            return;
         }
 
-        // Apply configured pixel type and count
-        strip.updateType(NEO_GRB + NEO_KHZ800);
-        strip.updateLength(CFG.andon.num_leds);
+        // The boot animation intentionally owns the LEDs until it completes.
+        // State changes received during boot are remembered and shown afterward.
+        state = YELLOW;
+        stateInitialized_ = true;
+        startBootAnimation();
 
-        // Initialize fade duration from config
-        fadeDurMs = CFG.andon.fade_ms;
-
-        strip.show(); // clear
-        startBootAnimation(); // boot animation starts immediately
-        io->println("{\"type\":\"status\",\"module\":\"andon\",\"msg\":\"initializing\"}");
-
-
-        // Default to YELLOW after boot finishes
-        setState(YELLOW);
+        io->println(
+            F("{\"type\":\"status\",\"module\":\"andon\",\"msg\":\"initialized\"}")
+        );
     }
 
     void loop() {
-        bootAnimationStep();
-        frame();
+        const uint32_t now = millis();
+
+        if (!hardwareOk) {
+            tryReconnectIfNeeded_(now);
+            return;
+        }
+
+        // This is intentional: while booting, the boot animation is the only
+        // content drawn. Requested states are retained and applied afterward.
+        if (booting) {
+            serviceBootAnimation_(now);
+            return;
+        }
+
+        if (isBlinkState_(state)) {
+            serviceBlink_(now);
+            return;
+        }
+
+        if (fading_) {
+            serviceFade_(now);
+        }
+    }
+
+    // Retained for compatibility. There is only one authoritative update path.
+    void stateMachine() {
+        loop();
     }
 
     void setState(States newState) {
+        if (stateInitialized_ && state == newState) {
+            return;
+        }
+
         state = newState;
-        blinkStatus = (state >= BLINK_GREEN && state <= BLINK_RED);
-        updateLEDs(true); // Use fade for solid states (ignored for blink states)
+        stateInitialized_ = true;
+        fading_ = false;
+
+        // During boot, remember the requested state but leave animation output
+        // untouched. It will be applied when the configured boot time expires.
+        if (booting) {
+            return;
+        }
+
+        applyCurrentState_(true);
     }
 
     void updateLEDs(bool fade) {
-        uint8_t r = 0, g = 0, b = 0;
-        switch (state) {
-            case GREEN:  r = 0;   g = 255; b = 0;   break;
-            case YELLOW: r = 255; g = 255; b = 0;   break;
-            case BLUE:   r = 0;   g = 0;   b = 255; break;
-            case RED:    r = 255; g = 0;   b = 0;   break;
-            case OFF:    r = g = b = 0;              break;
-            default: return; // blink states handled elsewhere
+        if (!hardwareOk || booting) {
+            return;
         }
+
+        if (isBlinkState_(state)) {
+            applyBlinkOnImmediately_();
+            return;
+        }
+
+        uint8_t r = 0;
+        uint8_t g = 0;
+        uint8_t b = 0;
+        getStateColor_(state, r, g, b);
         setColor(r, g, b, fade);
     }
 
     void setColor(uint8_t r, uint8_t g, uint8_t b, bool fade = true) {
-        // If currently blinking, ignore fades; blink path is authoritative
-        if (state >= BLINK_GREEN && state <= BLINK_RED) {
-            applyColor(r, g, b);
-            fading = false;
-            curR = r; curG = g; curB = b;
+        if (!hardwareOk || booting) {
             return;
         }
 
-        if (!fade) {
-            fading = false;
-            curR = r; curG = g; curB = b;
-            applyColor(curR, curG, curB);
+        if (isBlinkState_(state)) {
+            // Blink timing owns output while a blinking state is active.
             return;
         }
 
-        srcR = curR; srcG = curG; srcB = curB;
-        tgtR = r;    tgtG = g;    tgtB = b;
-        fadeStartMs = millis();
-        fadeDurMs   = CFG.andon.fade_ms;   // <-- use configured fade duration
-        fading = true;
-    }
-    
-    void frame() {
-        unsigned long now = millis();
-
-        // Frame cap (use configured frame dt)
-        if (now - lastFrameMs < CFG.andon.frame_dt_ms) return;
-        lastFrameMs = now;
-
-        // While booting, only boot draws frames
-        if (booting) {
-            bootAnimationDraw(); // split out drawing from bootAnimationStep()
-            strip.show();
+        if (!fade || CFG.andon.fade_ms == 0) {
+            fading_ = false;
+            curR_ = r;
+            curG_ = g;
+            curB_ = b;
+            writeColor_(curR_, curG_, curB_);
             return;
         }
 
-        bool wrote = false;
-
-        // Blink handling (no fade during blink)
-        if (state >= BLINK_GREEN && state <= BLINK_RED) {
-            if (now - lastBlinkTime >= CFG.andon.blink_interval_ms) {
-                lastBlinkTime = now;
-                blinkStatus = !blinkStatus;
-
-                uint8_t r=0, g=0, b=0;
-                if (blinkStatus) {
-                    switch (state) {
-                        case BLINK_GREEN:  r=0;   g=255; b=0;   break;
-                        case BLINK_YELLOW: r=255; g=255; b=0;   break;
-                        case BLINK_BLUE:   r=0;   g=0;   b=255; break;
-                        case BLINK_RED:    r=255; g=0;   b=0;   break;
-                        default: break;
-                    }
-                } else {
-                    r = g = b = 0;
-                }
-
-                curR = r; curG = g; curB = b;
-                applyColor(curR, curG, curB);
-                fading = false;
-                wrote = true;
-            }
-        }
-
-        // Fade step (only if not blinking this frame)
-        if (!wrote && fading) {
-            // Normalize time using configured fade duration
-            float t = float(now - fadeStartMs) / float(CFG.andon.fade_ms);
-            if (t >= 1.0f) t = 1.0f;
-
-            uint8_t nr = (uint8_t)(srcR + (int)((tgtR - srcR) * t));
-            uint8_t ng = (uint8_t)(srcG + (int)((tgtG - srcG) * t));
-            uint8_t nb = (uint8_t)(srcB + (int)((tgtB - srcB) * t));
-
-            if (nr != curR || ng != curG || nb != curB) {
-                curR = nr; curG = ng; curB = nb;
-                applyColor(curR, curG, curB);
-                wrote = true;
-            }
-
-            if (t >= 1.0f) {
-                fading = false;
-            }
-        }
-    }
-
-    void applyColor(uint8_t r, uint8_t g, uint8_t b) {
-        for (int i = 0; i < (int)CFG.andon.num_leds; i++) {
-            strip.setPixelColor(i, strip.Color(r, g, b));
-        }
-        strip.show();
-    }
-
-    void stateMachine() {
-        unsigned long currentTime = millis();
-
-        // Blink toggling when in blink states
-        if ((state >= BLINK_GREEN && state <= BLINK_RED) &&
-            (currentTime - lastBlinkTime >= CFG.andon.blink_interval_ms)) {
-            lastBlinkTime = currentTime;
-            blinkStatus = !blinkStatus;
-
-            uint8_t r = 0, g = 0, b = 0;
-            switch (state) {
-                case BLINK_GREEN:  r = 0;   g = 255; b = 0;   break;
-                case BLINK_YELLOW: r = 255; g = 255; b = 0;   break;
-                case BLINK_BLUE:   r = 0;   g = 0;   b = 255; break;
-                case BLINK_RED:    r = 255; g = 0;   b = 0;   break;
-                default: break;
-            }
-
-            if (blinkStatus) {
-                setColor(r, g, b, false); // No fade during blink
-            } else {
-                setColor(0, 0, 0, false);
-            }
-        }
+        srcR_ = curR_;
+        srcG_ = curG_;
+        srcB_ = curB_;
+        tgtR_ = r;
+        tgtG_ = g;
+        tgtB_ = b;
+        fadeStartMs_ = millis();
+        fadeDurationMs_ = CFG.andon.fade_ms;
+        fading_ = true;
     }
 
     void startBootAnimation() {
         booting = true;
-        bootStartTime = millis();
-        lastBootStepTime = 0;
-        bootStep = 0;
+        bootStartMs_ = millis();
+        lastBootStepMs_ = bootStartMs_;
+        lastFrameMs_ = 0;
+        bootStep_ = 0;
+        bootFrameDirty_ = true;
+        fading_ = false;
     }
 
-    void bootAnimationStep() {
-        if (!booting) return;
+private:
+    static constexpr uint32_t WIRE_TIMEOUT_US_ = 5000;
+    static constexpr uint32_t RECONNECT_INTERVAL_MS_ = 1000;
+    static constexpr uint32_t BOOT_STEP_INTERVAL_MS_ = 30;
 
-        unsigned long currentTime = millis();
-        if (currentTime - bootStartTime >= CFG.andon.boot_duration_ms) {
-            booting = false;
+    bool stateInitialized_ = false;
 
-            // Important: snap to the post-boot state immediately (no fade)
-            updateLEDs(false);
-            // Align fade baselines
-            srcR = curR; srcG = curG; srcB = curB;
-            tgtR = curR; tgtG = curG; tgtB = curB;
-            fading = false;
+    uint32_t lastFrameMs_ = 0;
+    uint32_t lastBlinkMs_ = 0;
+
+    bool fading_ = false;
+    uint32_t fadeStartMs_ = 0;
+    uint32_t fadeDurationMs_ = 0;
+    uint8_t curR_ = 0;
+    uint8_t curG_ = 0;
+    uint8_t curB_ = 0;
+    uint8_t srcR_ = 0;
+    uint8_t srcG_ = 0;
+    uint8_t srcB_ = 0;
+    uint8_t tgtR_ = 0;
+    uint8_t tgtG_ = 0;
+    uint8_t tgtB_ = 0;
+
+    uint32_t bootStartMs_ = 0;
+    uint32_t lastBootStepMs_ = 0;
+    uint16_t bootStep_ = 0;
+    bool bootFrameDirty_ = false;
+
+    uint32_t nextReconnectMs_ = 0;
+
+    void configureWireTimeout_() {
+#if defined(WIRE_HAS_TIMEOUT)
+        Wire1.setWireTimeout(WIRE_TIMEOUT_US_, true);
+        Wire1.clearWireTimeoutFlag();
+#endif
+    }
+
+    void clearWireTimeout_() {
+#if defined(WIRE_HAS_TIMEOUT)
+        Wire1.clearWireTimeoutFlag();
+#endif
+    }
+
+    bool consumeWireTimeout_() {
+#if defined(WIRE_HAS_TIMEOUT)
+        if (Wire1.getWireTimeoutFlag()) {
+            Wire1.clearWireTimeoutFlag();
+            return true;
+        }
+#endif
+        return false;
+    }
+
+    bool initializeHardware_() {
+        clearWireTimeout_();
+
+        if (!strip.begin(CFG.andon.neo_addr) || consumeWireTimeout_()) {
+            return false;
+        }
+
+        strip.updateType(NEO_GRB + NEO_KHZ800);
+        strip.updateLength(CFG.andon.num_leds);
+
+        // Establish a known black framebuffer and push it once.
+        for (uint16_t i = 0; i < CFG.andon.num_leds; ++i) {
+            strip.setPixelColor(i, 0);
+        }
+
+        clearWireTimeout_();
+        strip.show();
+        if (consumeWireTimeout_()) {
+            return false;
+        }
+
+        hardwareOk = true;
+        curR_ = curG_ = curB_ = 0;
+        return true;
+    }
+
+    void enterHeadlessMode_(const char* reason) {
+        const bool wasOperational = hardwareOk;
+
+        hardwareOk = false;
+        booting = false;
+        fading_ = false;
+        blinkStatus = false;
+        nextReconnectMs_ = millis() + RECONNECT_INTERVAL_MS_;
+
+        StaticJsonDocument<160> doc;
+        doc["type"] = "error";
+        doc["module"] = "andon";
+        doc["error"] = reason;
+        doc["mode"] = "headless";
+        doc["runtime"] = wasOperational;
+        serializeJson(doc, *io);
+        io->println();
+    }
+
+    void tryReconnectIfNeeded_(uint32_t now) {
+        if (static_cast<int32_t>(now - nextReconnectMs_) < 0) {
             return;
         }
-        // Manage timing here; no strip.show() in this function
-        if (currentTime - lastBootStepTime >= 30) {
-            lastBootStepTime = currentTime;
-            bootStep++;
+
+        nextReconnectMs_ = now + RECONNECT_INTERVAL_MS_;
+
+        // Reset/reconfigure only Wire1. BatteryMonitor and the OLED remain
+        // logically independent and will continue on their own schedule.
+        Wire1.begin();
+        configureWireTimeout_();
+
+        if (!initializeHardware_()) {
+            return;
+        }
+
+        io->println(
+            F("{\"type\":\"status\",\"module\":\"andon\",\"status\":\"reconnected\"}")
+        );
+
+        // A reconnect is treated like a fresh Andon start. The animation owns
+        // the LEDs, then the latest requested state is applied at completion.
+        startBootAnimation();
+    }
+
+    bool isBlinkState_(States value) const {
+        return value >= BLINK_GREEN && value <= BLINK_RED;
+    }
+
+    void getStateColor_(States value, uint8_t& r, uint8_t& g, uint8_t& b) const {
+        r = 0;
+        g = 0;
+        b = 0;
+
+        switch (value) {
+            case GREEN:
+            case BLINK_GREEN:
+                g = 255;
+                break;
+
+            case YELLOW:
+            case BLINK_YELLOW:
+                r = 255;
+                g = 255;
+                break;
+
+            case BLUE:
+            case BLINK_BLUE:
+                b = 255;
+                break;
+
+            case RED:
+            case BLINK_RED:
+                r = 255;
+                break;
+
+            case OFF:
+            default:
+                break;
         }
     }
 
-    void bootAnimationDraw() {
-        // Draw one boot frame (no show here—frame() will call show once)
-        for (int i = 0; i < (int)CFG.andon.num_leds; i++) {
-            int trailPos = (bootStep - i + (int)CFG.andon.num_leds) % (int)CFG.andon.num_leds;
-            float brightness = pow(0.6f, trailPos);
-            uint8_t hue = (uint8_t)((i * 256 / (int)CFG.andon.num_leds + bootStep * 5) % 256);
-            uint32_t color = Wheel(hue);
-            uint8_t r = (uint8_t)(((color >> 16) & 0xFF) * brightness);
-            uint8_t g = (uint8_t)(((color >> 8)  & 0xFF) * brightness);
-            uint8_t b = (uint8_t)(( color        & 0xFF) * brightness);
+    void applyCurrentState_(bool fadeSolid) {
+        if (!hardwareOk || booting) {
+            return;
+        }
+
+        if (isBlinkState_(state)) {
+            applyBlinkOnImmediately_();
+            return;
+        }
+
+        blinkStatus = false;
+
+        uint8_t r = 0;
+        uint8_t g = 0;
+        uint8_t b = 0;
+        getStateColor_(state, r, g, b);
+        setColor(r, g, b, fadeSolid);
+    }
+
+    void applyBlinkOnImmediately_() {
+        uint8_t r = 0;
+        uint8_t g = 0;
+        uint8_t b = 0;
+        getStateColor_(state, r, g, b);
+
+        blinkStatus = true;
+        lastBlinkMs_ = millis();
+        fading_ = false;
+        curR_ = r;
+        curG_ = g;
+        curB_ = b;
+        writeColor_(r, g, b);
+    }
+
+    void serviceBlink_(uint32_t now) {
+        if (
+            static_cast<uint32_t>(now - lastBlinkMs_) <
+            CFG.andon.blink_interval_ms
+        ) {
+            return;
+        }
+
+        lastBlinkMs_ = now;
+        blinkStatus = !blinkStatus;
+
+        uint8_t r = 0;
+        uint8_t g = 0;
+        uint8_t b = 0;
+
+        if (blinkStatus) {
+            getStateColor_(state, r, g, b);
+        }
+
+        curR_ = r;
+        curG_ = g;
+        curB_ = b;
+        writeColor_(r, g, b);
+    }
+
+    void serviceFade_(uint32_t now) {
+        if (
+            static_cast<uint32_t>(now - lastFrameMs_) <
+            CFG.andon.frame_dt_ms
+        ) {
+            return;
+        }
+
+        lastFrameMs_ = now;
+
+        if (fadeDurationMs_ == 0) {
+            curR_ = tgtR_;
+            curG_ = tgtG_;
+            curB_ = tgtB_;
+            fading_ = false;
+            writeColor_(curR_, curG_, curB_);
+            return;
+        }
+
+        float t = static_cast<float>(now - fadeStartMs_) /
+                  static_cast<float>(fadeDurationMs_);
+
+        if (t >= 1.0f) {
+            t = 1.0f;
+        }
+
+        const uint8_t nextR = interpolate_(srcR_, tgtR_, t);
+        const uint8_t nextG = interpolate_(srcG_, tgtG_, t);
+        const uint8_t nextB = interpolate_(srcB_, tgtB_, t);
+
+        if (nextR != curR_ || nextG != curG_ || nextB != curB_) {
+            curR_ = nextR;
+            curG_ = nextG;
+            curB_ = nextB;
+            writeColor_(curR_, curG_, curB_);
+        }
+
+        if (t >= 1.0f) {
+            fading_ = false;
+        }
+    }
+
+    uint8_t interpolate_(uint8_t from, uint8_t to, float t) const {
+        const float value =
+            static_cast<float>(from) +
+            (static_cast<float>(to) - static_cast<float>(from)) * t;
+
+        return static_cast<uint8_t>(constrain(value, 0.0f, 255.0f));
+    }
+
+    void serviceBootAnimation_(uint32_t now) {
+        if (
+            static_cast<uint32_t>(now - bootStartMs_) >=
+            CFG.andon.boot_duration_ms
+        ) {
+            booting = false;
+            bootFrameDirty_ = false;
+
+            // Snap directly to the latest requested post-boot state. This
+            // preserves the intentional behavior that boot animation owns the
+            // output for its entire configured duration.
+            applyCurrentState_(false);
+            return;
+        }
+
+        if (
+            static_cast<uint32_t>(now - lastBootStepMs_) >=
+            BOOT_STEP_INTERVAL_MS_
+        ) {
+            lastBootStepMs_ = now;
+            ++bootStep_;
+            bootFrameDirty_ = true;
+        }
+
+        if (!bootFrameDirty_) {
+            return;
+        }
+
+        if (
+            static_cast<uint32_t>(now - lastFrameMs_) <
+            CFG.andon.frame_dt_ms
+        ) {
+            return;
+        }
+
+        lastFrameMs_ = now;
+        bootFrameDirty_ = false;
+        drawBootFrame_();
+        showOrFault_("seesaw_boot_show_failed");
+    }
+
+    void drawBootFrame_() {
+        const int ledCount = static_cast<int>(CFG.andon.num_leds);
+        if (ledCount <= 0) {
+            return;
+        }
+
+        for (int i = 0; i < ledCount; ++i) {
+            const int trailPosition =
+                (static_cast<int>(bootStep_) - i + ledCount) % ledCount;
+
+            const float brightness = powf(0.6f, trailPosition);
+            const uint8_t hue = static_cast<uint8_t>(
+                (i * 256 / ledCount + static_cast<int>(bootStep_) * 5) % 256
+            );
+
+            const uint32_t color = wheel_(hue);
+            const uint8_t r = static_cast<uint8_t>(
+                ((color >> 16) & 0xFFu) * brightness
+            );
+            const uint8_t g = static_cast<uint8_t>(
+                ((color >> 8) & 0xFFu) * brightness
+            );
+            const uint8_t b = static_cast<uint8_t>(
+                (color & 0xFFu) * brightness
+            );
+
             strip.setPixelColor(i, strip.Color(r, g, b));
         }
     }
 
-private:
-    uint32_t Wheel(byte WheelPos) {
-        WheelPos = 255 - WheelPos;
-        if (WheelPos < 85) {
-            return strip.Color(255 - WheelPos * 3, 0, WheelPos * 3);
+    void writeColor_(uint8_t r, uint8_t g, uint8_t b) {
+        if (!hardwareOk) {
+            return;
         }
-        if (WheelPos < 170) {
-            WheelPos -= 85;
-            return strip.Color(0, WheelPos * 3, 255 - WheelPos * 3);
+
+        for (uint16_t i = 0; i < CFG.andon.num_leds; ++i) {
+            strip.setPixelColor(i, strip.Color(r, g, b));
         }
-        WheelPos -= 170;
-        return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
+
+        showOrFault_("seesaw_show_failed");
+    }
+
+    bool showOrFault_(const char* reason) {
+        if (!hardwareOk) {
+            return false;
+        }
+
+        clearWireTimeout_();
+        strip.show();
+
+        if (consumeWireTimeout_()) {
+            enterHeadlessMode_(reason);
+            return false;
+        }
+
+        return true;
+    }
+
+    uint32_t wheel_(uint8_t wheelPosition) {
+        wheelPosition = 255 - wheelPosition;
+
+        if (wheelPosition < 85) {
+            return strip.Color(
+                255 - wheelPosition * 3,
+                0,
+                wheelPosition * 3
+            );
+        }
+
+        if (wheelPosition < 170) {
+            wheelPosition -= 85;
+            return strip.Color(
+                0,
+                wheelPosition * 3,
+                255 - wheelPosition * 3
+            );
+        }
+
+        wheelPosition -= 170;
+        return strip.Color(
+            wheelPosition * 3,
+            255 - wheelPosition * 3,
+            0
+        );
     }
 };
 
