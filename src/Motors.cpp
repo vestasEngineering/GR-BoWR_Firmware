@@ -317,6 +317,284 @@ void Motors::pollEncoders() {
     }
 }
 
+uint8_t Motors::encoderReadValidMask() const {
+    uint8_t mask = 0;
+    for (uint8_t i = 0; i < 4; ++i) {
+        if (encValid_[i]) mask |= static_cast<uint8_t>(1u << i);
+    }
+    return mask;
+}
+
+bool Motors::allEncoderReadsValid() const {
+    return encoderReadValidMask() == 0x0F;
+}
+
+bool Motors::setRobotRearDistanceMMVerified(
+    float mm,
+    float toleranceMm,
+    uint32_t timeoutMs,
+    uint32_t retryDelayMs
+) {
+    if (
+        !isfinite(mm) ||
+        !isfinite(toleranceMm) ||
+        toleranceMm < 0.0f
+    ) {
+        return false;
+    }
+
+    if (timeoutMs < 250) {
+        timeoutMs = 250;
+    }
+
+    if (retryDelayMs < 20) {
+        retryDelayMs = 20;
+    }
+
+    const int32_t normalizedTarget =
+        mm_to_distance_counts(mm);
+
+    const int32_t expectedRaw[4] = {
+        normalizedTarget * AXIS_SIGN[0],
+        normalizedTarget * AXIS_SIGN[1],
+        normalizedTarget * AXIS_SIGN[2],
+        normalizedTarget * AXIS_SIGN[3],
+    };
+
+    const int32_t toleranceCounts = max(
+        static_cast<int32_t>(1),
+        static_cast<int32_t>(
+            ceilf(
+                toleranceMm /
+                DISTANCE_MM_PER_COUNT
+            )
+        )
+    );
+
+    lastEncoderRestoreValidMask_ = 0;
+    lastEncoderRestoreWriteAttempts_ = 0;
+    lastEncoderRestoreMaximumErrorMM_ = 0.0f;
+
+    /*
+     * Ensure no stored speed command can resume.
+     *
+     * Motion remains inhibited by EncoderSession throughout this
+     * transaction. BRAKE_STOP additionally clears the stored speed
+     * values and sends an immediate zero-speed command.
+     */
+    BRAKE_STOP();
+
+    const uint32_t startedAtMs = millis();
+
+    while (
+        static_cast<uint32_t>(
+            millis() - startedAtMs
+        ) < timeoutMs
+    ) {
+        ++lastEncoderRestoreWriteAttempts_;
+
+        /*
+         * Write every encoder on every attempt.
+         *
+         * This is intentional. If the RoboClaws were still booting
+         * during an earlier attempt, the entire logical position is
+         * written again as one idempotent transaction.
+         */
+        rcA.SetEncM1(
+            ADDR_A,
+            u32bits(expectedRaw[0])
+        );
+
+        rcA.SetEncM2(
+            ADDR_A,
+            u32bits(expectedRaw[1])
+        );
+
+        rcB.SetEncM1(
+            ADDR_B,
+            u32bits(expectedRaw[2])
+        );
+
+        rcB.SetEncM2(
+            ADDR_B,
+            u32bits(expectedRaw[3])
+        );
+
+        /*
+         * Give the controllers time to process the writes before
+         * performing direct readback.
+         */
+        delay(40);
+
+        int32_t actualRaw[4] = {
+            0,
+            0,
+            0,
+            0,
+        };
+
+        uint8_t validMask = 0;
+
+        uint8_t status = 0;
+        bool valid = false;
+
+        actualRaw[0] = static_cast<int32_t>(
+            rcA.ReadEncM1(
+                ADDR_A,
+                &status,
+                &valid
+            )
+        );
+
+        encStatus_[0] = status;
+        encValid_[0] = valid;
+
+        if (valid) {
+            validMask |= 1u << 0;
+        }
+
+        status = 0;
+        valid = false;
+
+        actualRaw[1] = static_cast<int32_t>(
+            rcA.ReadEncM2(
+                ADDR_A,
+                &status,
+                &valid
+            )
+        );
+
+        encStatus_[1] = status;
+        encValid_[1] = valid;
+
+        if (valid) {
+            validMask |= 1u << 1;
+        }
+
+        status = 0;
+        valid = false;
+
+        actualRaw[2] = static_cast<int32_t>(
+            rcB.ReadEncM1(
+                ADDR_B,
+                &status,
+                &valid
+            )
+        );
+
+        encStatus_[2] = status;
+        encValid_[2] = valid;
+
+        if (valid) {
+            validMask |= 1u << 2;
+        }
+
+        status = 0;
+        valid = false;
+
+        actualRaw[3] = static_cast<int32_t>(
+            rcB.ReadEncM2(
+                ADDR_B,
+                &status,
+                &valid
+            )
+        );
+
+        encStatus_[3] = status;
+        encValid_[3] = valid;
+
+        if (valid) {
+            validMask |= 1u << 3;
+        }
+
+        lastEncoderRestoreValidMask_ =
+            validMask;
+
+        if (validMask == 0x0F) {
+            bool allWithinTolerance = true;
+            float maximumErrorMm = 0.0f;
+
+            for (
+                uint8_t axis = 0;
+                axis < 4;
+                ++axis
+            ) {
+                const int64_t difference =
+                    static_cast<int64_t>(
+                        actualRaw[axis]
+                    ) -
+                    static_cast<int64_t>(
+                        expectedRaw[axis]
+                    );
+
+                const int64_t absoluteDifference =
+                    difference < 0
+                        ? -difference
+                        : difference;
+
+                const float errorMm =
+                    static_cast<float>(
+                        absoluteDifference
+                    ) *
+                    DISTANCE_MM_PER_COUNT;
+
+                if (
+                    errorMm >
+                    maximumErrorMm
+                ) {
+                    maximumErrorMm =
+                        errorMm;
+                }
+
+                if (
+                    absoluteDifference >
+                    toleranceCounts
+                ) {
+                    allWithinTolerance =
+                        false;
+                }
+            }
+
+            lastEncoderRestoreMaximumErrorMM_ =
+                maximumErrorMm;
+
+            if (allWithinTolerance) {
+                /*
+                 * Only update the local cache with values that were
+                 * actually read back from the RoboClaws.
+                 */
+                for (
+                    uint8_t axis = 0;
+                    axis < 4;
+                    ++axis
+                ) {
+                    encCounts[axis] =
+                        actualRaw[axis];
+
+                    qpps[axis] = 0;
+                }
+
+                closedLoopStopActive = true;
+
+                return true;
+            }
+        }
+
+        /*
+         * Stay stopped while waiting for the next attempt.
+         */
+        BRAKE_STOP();
+
+        delay(retryDelayMs);
+    }
+
+    /*
+     * Do not update the local cache with the requested value after
+     * failure. The session remains invalid and the CM5 retains the
+     * durable last-valid checkpoint.
+     */
+    return false;
+}
 
 // ---------- Public loop ----------
 void Motors::update() {

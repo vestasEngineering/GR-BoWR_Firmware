@@ -41,11 +41,38 @@ public:
     bool     expectedActive[NUM_ACTUATORS] = {false, false, false, false};
     uint32_t checkAtMs[NUM_ACTUATORS] = {0, 0, 0, 0};
 
+    bool commandedActive[NUM_ACTUATORS] = {false, false, false, false};
+    bool feedbackActive[NUM_ACTUATORS] = {false, false, false, false};    
+
     static constexpr uint8_t DAC_ADDR = 0x60;
     static constexpr uint8_t ADC_ADDR = 0x48;
     static constexpr uint32_t REINIT_PERIOD_MS = 500;
     static constexpr uint32_t WIRE_TIMEOUT_US = 5000;
     static constexpr uint32_t ADC_CONVERSION_US = 9000; // ADS1115 at 128 SPS plus margin.
+
+    uint8_t commandedActiveMask() const {
+        uint8_t mask = 0;
+
+        for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) {
+            if (commandedActive[i]) {
+                mask |= (1u << i);
+            }
+        }
+
+        return mask;
+    }
+
+    uint8_t feedbackActiveMask() const {
+        uint8_t mask = 0;
+
+        for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) {
+            if (feedbackActive[i]) {
+                mask |= (1u << i);
+            }
+        }
+
+        return mask;
+    }
 
     bool hasPCBFault() const { return pcbFault_; }
     bool hasFault() const {
@@ -87,26 +114,60 @@ public:
             emitError_("invalid_dac_channel", channel);
             return;
         }
-        if (pcbFault_) return;
 
-        MCP4728_channel_t c = MCP4728_CHANNEL_A;
-        switch (channel) {
-            case 0: c = MCP4728_CHANNEL_A; break;
-            case 1: c = MCP4728_CHANNEL_B; break;
-            case 2: c = MCP4728_CHANNEL_C; break;
-            case 3: c = MCP4728_CHANNEL_D; break;
+        const float v = constrain(
+            voltage,
+            0.0f,
+            CFG.actuator.maxCommandVoltage
+        );
+
+        if (v >= CFG.actuator.activate_cmd_min_v) {
+            commandedActive[channel] = true;
+        } else if (v <= CFG.actuator.deactivate_cmd_max_v) {
+            commandedActive[channel] = false;
         }
 
-        const float v = constrain(voltage, 0.0f, CFG.actuator.maxCommandVoltage);
-        const uint16_t value = static_cast<uint16_t>((v / CFG.actuator.maxCommandVoltage) * 4095.0f);
+        if (pcbFault_) {
+            return;
+        }
+
+        MCP4728_channel_t c = MCP4728_CHANNEL_A;
+
+        switch (channel) {
+            case 0:
+                c = MCP4728_CHANNEL_A;
+                break;
+            case 1:
+                c = MCP4728_CHANNEL_B;
+                break;
+            case 2:
+                c = MCP4728_CHANNEL_C;
+                break;
+            case 3:
+                c = MCP4728_CHANNEL_D;
+                break;
+        }
+
+        const uint16_t value = static_cast<uint16_t>(
+            (v / CFG.actuator.maxCommandVoltage) * 4095.0f
+        );
 
         clearWireTimeout_();
         emitI2CDebug_("before", "dac_write", channel);
-        const bool ok = dac.setChannelValue(c, value, MCP4728_VREF_VDD,
-                                            MCP4728_GAIN_1X, MCP4728_PD_MODE_NORMAL);
+
+        const bool ok = dac.setChannelValue(
+            c,
+            value,
+            MCP4728_VREF_VDD,
+            MCP4728_GAIN_1X,
+            MCP4728_PD_MODE_NORMAL
+        );
+
         emitI2CDebug_("after", "dac_write", channel);
 
-        if (!ok || consumeWireTimeout_()) latchI2CFault_("dac_write", channel);
+        if (!ok || consumeWireTimeout_()) {
+            latchI2CFault_("dac_write", channel);
+        }
     }
 
     // Compatibility API. The normal state machine does NOT call this blocking wrapper.
@@ -317,7 +378,13 @@ private:
                     return;
                 }
                 emitI2CDebug_("after", "adc_result", adcChannel_);
-                feedbackSignals[adcChannel_] = rawToVoltage_(static_cast<int16_t>(rawBits));
+                feedbackSignals[adcChannel_] =
+                    rawToVoltage_(static_cast<int16_t>(rawBits));
+
+                updateFeedbackActive_(
+                    adcChannel_,
+                    feedbackSignals[adcChannel_]
+                );
                 evaluateJam_(adcChannel_, millis());
                 ++adcChannel_;
                 adcPhase_ = AdcPhase::START;
@@ -337,13 +404,30 @@ private:
         if (!readRegister16_(ADS_REG_CONVERSION, rawBits)) {
             latchI2CFault_("adc_result_sync", channel); return false;
         }
-        voltage = rawToVoltage_(static_cast<int16_t>(rawBits));
+        voltage = rawToVoltage_(
+            static_cast<int16_t>(rawBits)
+        );
+
+        updateFeedbackActive_(
+            channel,
+            voltage
+        );
         return true;
     }
 
     float rawToVoltage_(int16_t raw) const {
-        float v = (static_cast<float>(raw) / 32767.0f) * CFG.actuator.maxFeedbackVoltage;
-        return constrain(v, 0.0f, CFG.actuator.maxFeedbackVoltage);
+        static constexpr float ADS_FULL_SCALE_V =
+            6.144f;
+
+        const float voltage =
+            static_cast<float>(raw) *
+            (ADS_FULL_SCALE_V / 32768.0f);
+
+        return constrain(
+            voltage,
+            0.0f,
+            CFG.actuator.maxFeedbackVoltage
+        );
     }
 
     void armJamCheck_(uint8_t i, float cmdV, uint32_t now) {
@@ -359,15 +443,39 @@ private:
         jammed[i] = false;
     }
 
-    void evaluateJam_(uint8_t i, uint32_t now) {
-        if (!checkArmed[i] || static_cast<int32_t>(now - checkAtMs[i]) < 0) return;
-        if (expectedActive[i]) {
-            lastErrV[i] = CFG.actuator.active_fb_min_v - feedbackSignals[i];
-            jammed[i] = feedbackSignals[i] < CFG.actuator.active_fb_min_v;
-        } else {
-            lastErrV[i] = feedbackSignals[i] - CFG.actuator.inactive_fb_max_v;
-            jammed[i] = feedbackSignals[i] > CFG.actuator.inactive_fb_max_v;
+    void evaluateJam_(
+        uint8_t i,
+        uint32_t now
+    ) {
+        if (
+            !checkArmed[i] ||
+            static_cast<int32_t>(
+                now - checkAtMs[i]
+            ) < 0
+        ) {
+            return;
         }
+
+        if (expectedActive[i]) {
+            // An active actuator should have low feedback.
+            lastErrV[i] =
+                feedbackSignals[i] -
+                CFG.actuator.active_fb_max_v;
+
+            jammed[i] =
+                feedbackSignals[i] >
+                CFG.actuator.active_fb_max_v;
+        } else {
+            // An inactive actuator should have high feedback.
+            lastErrV[i] =
+                CFG.actuator.inactive_fb_min_v -
+                feedbackSignals[i];
+
+            jammed[i] =
+                feedbackSignals[i] <
+                CFG.actuator.inactive_fb_min_v;
+        }
+
         checkArmed[i] = false;
     }
 
@@ -407,6 +515,22 @@ private:
         state = SET_POSITION;
         resetAdcSequencer_();
         emitStatus_("i2c_recovered");
+    }
+
+    void updateFeedbackActive_(uint8_t channel, float voltage) {
+        if (channel >= NUM_ACTUATORS) {
+            return;
+        }
+
+        // Feedback is active-low:
+        // Low voltage confirms active.
+        // High voltage confirms inactive.
+        // Between the thresholds, retain the previous state.
+        if (voltage <= CFG.actuator.active_fb_max_v) {
+            feedbackActive[channel] = true;
+        } else if (voltage >= CFG.actuator.inactive_fb_min_v) {
+            feedbackActive[channel] = false;
+        }
     }
 
     void emitStatus_(const char* status, const char* fault = nullptr) {

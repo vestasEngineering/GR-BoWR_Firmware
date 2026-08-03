@@ -10,10 +10,10 @@ struct ActuatorCfg {
     float maxFeedbackVoltage     = 5.0f;
 
     uint16_t settle_ms           = 15000;
-    float    activate_cmd_min_v  = 5.0f;
+    float    activate_cmd_min_v  = 4.0f;
     float    deactivate_cmd_max_v= 0.5f;
-    float    active_fb_min_v     = 4.0f;
-    float    inactive_fb_max_v   = 2.0f;
+    float    active_fb_max_v     = 1.00f;
+    float    inactive_fb_min_v   = 2.20f;
 
     float    fb_map_m            = -0.529920101f;
     float    fb_map_b            =  2.705734968f;
@@ -137,7 +137,7 @@ struct UltrasonicCfg {
     float track_accel_mps2       = 0.25f;
     float track_decel_mps2       = 1.00f;
 
-    bool telemetry_enabled       = true;
+    bool telemetry_enabled       = false;
     uint16_t telemetry_period_ms = 50; // 20 Hz
 };
 
@@ -155,6 +155,13 @@ struct SerialCfg {
     size_t   rx_buf_bytes       = 512;
 };
 
+struct ContactorCfg {
+    int pin = D2;
+    bool high_means_power_lost = true;
+    bool pullup = true;
+    uint16_t debounce_ms = 75;
+};
+
 struct RobotConfig {
     ActuatorCfg        actuator;
     AndonCfg           andon;
@@ -167,6 +174,7 @@ struct RobotConfig {
     UltrasonicServoCfg ut_servo;
     SerialCfg          serial;
     ClampCfg           clamp;
+    ContactorCfg       contactor;
 };
 
 extern RobotConfig CFG;

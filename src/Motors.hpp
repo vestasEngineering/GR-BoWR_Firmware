@@ -31,6 +31,27 @@ public:
     int32_t maxCommandQpps = 2500; //10000 original
     int32_t accelQppsPerSec = 4250;
 
+    uint8_t encoderReadValidMask() const;
+    bool allEncoderReadsValid() const;
+    bool setRobotRearDistanceMMVerified(
+        float mm,
+        float toleranceMm = 2.0f,
+        uint32_t timeoutMs = 4000,
+        uint32_t retryDelayMs = 100
+    );
+
+    uint8_t lastEncoderRestoreValidMask() const {
+        return lastEncoderRestoreValidMask_;
+    }
+
+    uint8_t lastEncoderRestoreWriteAttempts() const {
+        return lastEncoderRestoreWriteAttempts_;
+    }
+
+    float lastEncoderRestoreMaximumErrorMM() const {
+        return lastEncoderRestoreMaximumErrorMM_;
+    }
+
     int32_t brakeDecelQppsPerSec = 8500;
 
     bool closedLoopStopActive = false;
@@ -154,6 +175,10 @@ private:
     // ------------------------------------------------------------
     static uint32_t u32bits(int32_t v);
     volatile bool motionInhibited_ = false;
+
+    uint8_t lastEncoderRestoreValidMask_ = 0;
+    uint8_t lastEncoderRestoreWriteAttempts_ = 0;
+    float lastEncoderRestoreMaximumErrorMM_ = 0.0f;
 
     int32_t ms_to_qpps(float ms) const;
 

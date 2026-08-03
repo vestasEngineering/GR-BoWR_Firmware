@@ -123,6 +123,12 @@
 #ifndef FEATURE_MOTORS
   #define FEATURE_MOTORS 1
 #endif
+#ifndef ROBOT_HARDWARE_REVISION
+  #define ROBOT_HARDWARE_REVISION "A"
+#endif
+#ifndef ROBOT_MAX_SUPPORTED_CHANNELS
+  #define ROBOT_MAX_SUPPORTED_CHANNELS 8
+#endif
 
 // ---------------------------
 //  Safety checks (required fields present)
@@ -188,6 +194,10 @@ inline String platform() { return String(BUILD_PLATFORM); }
 inline String channel()  { return String(BUILD_CHANNEL); }
 inline String model()    { return String(ROBOT_MODEL); }
 inline String fleetId()  { return String(ROBOT_FLEET_ID); }
+inline String hardwareRevision() {return String(ROBOT_HARDWARE_REVISION);}
+inline int installedActuatorChannels() {return NUM_ACTUATORS;}
+inline int maximumSupportedChannels() {return ROBOT_MAX_SUPPORTED_CHANNELS;}
+
 
 inline void printHumanReadable(Stream& out = Serial) {
   out.println(F("===== Firmware Version ====="));
@@ -210,23 +220,80 @@ inline void printHumanReadable(Stream& out = Serial) {
 }
 
 inline void printJson(Stream& out = Serial) {
-  // Minimal JSON without ArduinoJson dependency to keep this header light.
   out.print(F("{\"type\":\"fw_version\","));
-  out.print(F("\"model\":\""));       out.print(model());      out.print(F("\","));
-  out.print(F("\"fleet_id\":\""));    out.print(fleetId());    out.print(F("\","));
-  out.print(F("\"semver\":\""));      out.print(semver());     out.print(F("\","));
-  out.print(F("\"build\":\""));       out.print(buildStamp()); out.print(F("\","));
-  out.print(F("\"board\":\""));       out.print(board());      out.print(F("\","));
-  out.print(F("\"platform\":\""));    out.print(platform());   out.print(F("\","));
-  out.print(F("\"channel\":\""));     out.print(channel());    out.print(F("\","));
-  out.print(F("\"git\":\""));         out.print(shortGit());   out.print(F("\","));
+
+  out.print(F("\"model\":\""));
+  out.print(model());
+  out.print(F("\","));
+
+  out.print(F("\"fleet_id\":\""));
+  out.print(fleetId());
+  out.print(F("\","));
+
+  out.print(F("\"hardware_revision\":\""));
+  out.print(hardwareRevision());
+  out.print(F("\","));
+
+  out.print(F("\"semver\":\""));
+  out.print(semver());
+  out.print(F("\","));
+
+  out.print(F("\"build\":\""));
+  out.print(buildStamp());
+  out.print(F("\","));
+
+  out.print(F("\"board\":\""));
+  out.print(board());
+  out.print(F("\","));
+
+  out.print(F("\"platform\":\""));
+  out.print(platform());
+  out.print(F("\","));
+
+  out.print(F("\"channel\":\""));
+  out.print(channel());
+  out.print(F("\","));
+
+  out.print(F("\"git\":\""));
+  out.print(shortGit());
+  out.print(F("\","));
+
+  out.print(F("\"capabilities\":{"));
+
+  out.print(F("\"max_supported_channels\":"));
+  out.print(maximumSupportedChannels());
+  out.print(F(","));
+
+  out.print(F("\"atomic_trigger_update\":true,"));
+  out.print(F("\"configuration_schema_version\":1"));
+
+  out.print(F("},"));
+
   out.print(F("\"features\":{"));
-    out.print(F("\"andon_light\":"));          out.print(FEATURE_ANDON);         out.print(F(","));
-    out.print(F("\"ultrasonic\":"));     out.print(FEATURE_ULTRASONIC);    out.print(F(","));
-    out.print(F("\"ultrasonic_servo\":"));out.print(FEATURE_ULTRASONIC_SERVO); out.print(F(","));
-    out.print(F("\"actuator\":"));       out.print(FEATURE_ACTUATOR);      out.print(F(","));
-    out.print(F("\"battery_oled\":"));   out.print(FEATURE_BATTERY_OLED);  out.print(F(","));
-    out.print(F("\"motors\":"));         out.print(FEATURE_MOTORS);
+
+  out.print(F("\"andon_light\":"));
+  out.print(FEATURE_ANDON);
+  out.print(F(","));
+
+  out.print(F("\"ultrasonic\":"));
+  out.print(FEATURE_ULTRASONIC);
+  out.print(F(","));
+
+  out.print(F("\"ultrasonic_servo\":"));
+  out.print(FEATURE_ULTRASONIC_SERVO);
+  out.print(F(","));
+
+  out.print(F("\"actuator\":"));
+  out.print(FEATURE_ACTUATOR);
+  out.print(F(","));
+
+  out.print(F("\"battery_oled\":"));
+  out.print(FEATURE_BATTERY_OLED);
+  out.print(F(","));
+
+  out.print(F("\"motors\":"));
+  out.print(FEATURE_MOTORS);
+
   out.print(F("}}"));
   out.println();
 }

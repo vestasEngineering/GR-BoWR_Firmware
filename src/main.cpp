@@ -9,6 +9,7 @@
  */
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <mbed.h>
 #include <math.h>
 #include "Config.hpp"
@@ -40,6 +41,12 @@ AndonLight andonLight(myUART0);
 
 #include "ClampSensor.hpp"
 ClampSensor clamp(CFG.clamp);
+
+#include "ContactorMonitor.hpp"
+ContactorMonitor contactor;
+
+#include "EncoderSession.hpp"
+EncoderSession encoderSession(contactor, motors, myUART0);
 
 #include <MySerial.hpp>
 MySerial mySerial(myUART0, actuator, andonLight, motors);
@@ -167,7 +174,10 @@ void setup() {
 
   delay(200);
   mySerial.setup();
+  mySerial.attachEncoderSession(encoderSession);
   motors.begin();
+  contactor.setup();
+  encoderSession.setup();
   ultrasonic.setup();
   ultrasonicServo.attachUltrasonic(ultrasonic);
   estop.setup();
@@ -187,8 +197,12 @@ void setup() {
   clamp.setup();
   andonLight.setup();
   andonMgr.setup();
-
   
+  mySerial.emitProcessStatus(
+    false,
+    "firmware_startup"
+  );
+
   // --- Boot health check: probe subsystems and emit one JSON line to Raspberry Pi ---
   BootHealth::Report rep = BootHealth::run(
       andonLight,
@@ -232,11 +246,9 @@ void updateActuatorConnectionMode()
         ultrasonicServo.deactivate();
         ultrasonic.servoSettleDelay = 0;
 
-        myUART0.println(
-            "{\"type\":\"status\","
-            "\"module\":\"motion\","
-            "\"status\":\"ultrasonic_stopped\","
-            "\"reason\":\"actuator_dac_adc_disconnected\"}"
+        mySerial.emitProcessStatus(
+            false,
+          "actuator_dac_adc_disconnected"
         );
     }
 
@@ -259,8 +271,10 @@ void updateActuatorConnectionMode()
     actuatorWasConnected = actuatorConnected;
 }
 
-void loop()
-{
+void loop() {
+
+    const uint32_t now = millis();
+    
     if (andonLight.booting) {
         motors.setMotionInhibited(true);
         andonLight.loop();
@@ -269,16 +283,18 @@ void loop()
 
     andonLight.loop();
     estop.tick();
+    encoderSession.tick(ultrasonicEnabled);
     clamp.tick();
     batteryMonitor.stateMachine();
-
-    // Process incoming commands.
-    mySerial.stateMachine();
 
     // Check actuator DAC/ADC connection before choosing which controller
     // is allowed to issue motor commands.
     actuator.stateMachine();
     updateActuatorConnectionMode();
+
+    // Process incoming commands.
+    mySerial.stateMachine();
+    mySerial.emitActuatorStatus();
 
     // Apply hard safety conditions before accepting motion commands.
     andonMgr.enforceMotionSafety();

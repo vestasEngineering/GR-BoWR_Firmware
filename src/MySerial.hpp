@@ -14,6 +14,7 @@
 #include "UltrasonicServo.hpp"
 #include "JogControl.hpp"
 #include "Version.hpp"
+#include "EncoderSession.hpp"
 
 class AndonManager;
 class Ultrasonic;
@@ -40,6 +41,18 @@ public:
 
     unsigned long lastEncoderEmitMs = 0;
     static constexpr unsigned long encoderEmitPeriodMs = 500;
+    
+    unsigned long lastActuatorEmitMs = 0;
+    static constexpr unsigned long actuatorEmitPeriodMs = 250;
+
+    unsigned long lastActuatorSnapshotMs = 0;
+    static constexpr unsigned long actuatorSnapshotPeriodMs = 2000;
+
+    uint8_t lastActuatorCommandMask = 0xFF;
+    uint8_t lastActuatorFeedbackMask = 0xFF;
+    uint8_t lastActuatorJamMask = 0xFF;
+    bool lastActuatorPcbFault = false;
+
 
     struct Trigger {
         int threshold;
@@ -60,6 +73,8 @@ public:
     UltrasonicServo* ultrasonicServo_ = nullptr;    
     Stream* io = nullptr;
     JogControl* jogControl = nullptr;
+    EncoderSession* encoderSession_ = nullptr;
+
 
     
     MySerial(Stream& ioRef, ActuatorControl& actuatorRef, AndonLight& lightRef, Motors& motorsRef)
@@ -84,6 +99,8 @@ public:
     void attachJogControl(JogControl& jog) {
             jogControl = &jog;
         }
+
+    void attachEncoderSession(EncoderSession& session) { encoderSession_ = &session; }
 
     // Helper for AndonManager: "is comms alive recently?"
     bool commsAlive() const {
@@ -123,6 +140,79 @@ public:
             case AndonLight::BLINK_RED:    return "BLINK_RED";
             default:                       return "UNKNOWN";
         }
+    }
+
+    void emitActuatorStatus(bool force = false) {
+        if (!actuator) {
+            return;
+        }
+
+        const uint8_t commandMask =
+            actuator->commandedActiveMask();
+
+        const uint8_t feedbackMask =
+            actuator->feedbackActiveMask();
+
+        const uint8_t jamMask =
+            actuator->jamMask();
+
+        const bool pcbFault =
+            actuator->hasPCBFault();
+
+        const bool changed =
+            commandMask != lastActuatorCommandMask ||
+            feedbackMask != lastActuatorFeedbackMask ||
+            jamMask != lastActuatorJamMask ||
+            pcbFault != lastActuatorPcbFault;
+
+        if (!force && !changed) {
+            return;
+        }
+
+        lastActuatorCommandMask = commandMask;
+        lastActuatorFeedbackMask = feedbackMask;
+        lastActuatorJamMask = jamMask;
+        lastActuatorPcbFault = pcbFault;
+
+        StaticJsonDocument<384> doc;
+
+        doc["type"] = "actuator_status";
+        doc["commanded_mask"] = commandMask;
+        doc["feedback_mask"] = feedbackMask;
+        doc["jam_mask"] = jamMask;
+        doc["pcb_fault"] = pcbFault;
+        doc["ts_ms"] = millis();
+
+        doc["activate_cmd_min_v"] =
+            CFG.actuator.activate_cmd_min_v;
+
+        doc["deactivate_cmd_max_v"] =
+            CFG.actuator.deactivate_cmd_max_v;
+
+        doc["active_fb_max_v"] =
+            CFG.actuator.active_fb_max_v;
+
+        doc["inactive_fb_min_v"] =
+            CFG.actuator.inactive_fb_min_v;
+
+        JsonArray commandVolts =
+            doc.createNestedArray("command_v");
+
+        JsonArray feedbackVolts =
+            doc.createNestedArray("feedback_v");
+
+        for (uint8_t i = 0; i < NUM_ACTUATORS; ++i) {
+            commandVolts.add(
+                actuator->actuatorPositions[i]
+            );
+
+            feedbackVolts.add(
+                actuator->feedbackSignals[i]
+            );
+        }
+
+        serializeJson(doc, *io);
+        io->println();
     }
 
     void sendAndonDiagnostics(AndonLight::States state,
@@ -213,6 +303,22 @@ public:
         if (now - lastEncoderEmitMs >= encoderEmitPeriodMs) {
             lastEncoderEmitMs = now;
             emitEncoderStatus();
+        }
+
+        if (now - lastActuatorEmitMs >= actuatorEmitPeriodMs) {
+            lastActuatorEmitMs = now;
+
+            // Normally emit only when one of the actuator masks changes.
+            // Every 2 seconds, force a full snapshot even if nothing changed.
+            const bool forceSnapshot =
+                now - lastActuatorSnapshotMs >=
+                actuatorSnapshotPeriodMs;
+
+            emitActuatorStatus(forceSnapshot);
+
+            if (forceSnapshot) {
+                lastActuatorSnapshotMs = now;
+            }
         }
 
         switch (state) {
@@ -451,41 +557,116 @@ public:
             response["feedback"] = feedback;
             serializeJson(response, *io); io->println();
         }
-        else if (action.equalsIgnoreCase("reset_encoder")) {
-            motors->resetEncoders();
-
-            StaticJsonDocument<96> response;
-            response["status"] = "All encoders reset";
-            response["type"] = "encoder_reset";
-            response["radius_m"] = 0.0;
-            serializeJson(response, *io);
-            io->println();
-
-            emitEncoderStatus();
+        else if (action.equalsIgnoreCase("get_actuator_status")) {
+            emitActuatorStatus(true);
         }
-        else if (action.equalsIgnoreCase("set_encoder")) {
-            float radiusM = jsonPacket["radius_m"] | 0.0f;
+        else if (action.equalsIgnoreCase("reset_encoder") || action.equalsIgnoreCase("set_encoder")) {
+            const bool isReset = action.equalsIgnoreCase("reset_encoder");
+            const char* transactionId = jsonPacket["transaction_id"] | "";
+            const char* source = jsonPacket["source"] | (isReset ? "operator_reset" : "operator_set");
+            const uint32_t expectedSession = jsonPacket["expected_session_id"] |
+                (encoderSession_ ? encoderSession_->sessionId() : 0);
 
-            // Keep operator input sane. Adjust upper bound if needed.
-            if (!isfinite(radiusM)) {
-                radiusM = 0.0f;
+            StaticJsonDocument<384> response;
+            response["type"] = isReset ? "encoder_reset" : "encoder_set";
+            response["transaction_id"] = transactionId;
+            response["source"] = source;
+            response["encoder_session_id"] = encoderSession_ ? encoderSession_->sessionId() : 0;
+            response["ts_ms"] = millis();
+
+            if (!encoderSession_) {
+                response["ok"] = false;
+                response["valid"] = false;
+                response["error"] = "encoder_session_not_attached";
+                serializeJson(response, *io); io->println();
+                return;
             }
 
-            if (radiusM < 0.0f) {
-                radiusM = 0.0f;
+            if (!encoderSession_->beginTransaction(expectedSession)) {
+                response["ok"] = false;
+                response["valid"] = false;
+                response["error"] = encoderSession_->motorPowerPresent()
+                    ? "encoder_session_mismatch" : "motor_power_absent";
+                serializeJson(response, *io); io->println();
+                return;
             }
 
-            motors->STOP();
-            motors->setRobotRearDistanceM(radiusM);
+            float requestedMm = 0.0f;
+            if (!isReset) {
+                if (jsonPacket.containsKey("position_mm")) {
+                    requestedMm = jsonPacket["position_mm"] | 0.0f;
+                } else {
+                    const float radiusM = jsonPacket["radius_m"] | 0.0f;
+                    requestedMm = radiusM * 1000.0f;
+                }
+            }
 
-            StaticJsonDocument<128> response;
-            response["status"] = "encoder_set";
-            response["type"] = "encoder_set";
-            response["radius_m"] = radiusM;
-            response["rear_distance_mm"] = radiusM * 1000.0f;
-            serializeJson(response, *io);
-            io->println();
+            if (!isfinite(requestedMm)) {
+                encoderSession_->transactionFailed("invalid_position", transactionId);
+                response["ok"] = false;
+                response["valid"] = false;
+                response["error"] = "invalid_position";
+                serializeJson(response, *io); io->println();
+                return;
+            }
 
+            motors->BRAKE_STOP();
+            const bool verified = motors->setRobotRearDistanceMMVerified(requestedMm, 2.0f);
+            if (!verified) {
+                encoderSession_->transactionFailed(
+                    "readback_failed",
+                    transactionId
+                );
+
+             response["ok"] = false;
+                response["valid"] = false;
+                response["error"] = "readback_failed";
+
+                response["encoder_read_mask"] =
+                    motors->lastEncoderRestoreValidMask();
+
+                response["restore_attempts"] =
+                    motors->lastEncoderRestoreWriteAttempts();
+
+                response["maximum_error_mm"] =
+                    motors->lastEncoderRestoreMaximumErrorMM();
+
+                response["requested_distance_mm"] =
+                    requestedMm;
+                response["motor_power_present"] =
+                    encoderSession_->motorPowerPresent();
+
+                JsonArray observedCounts =
+                    response.createNestedArray(
+                        "observed*counts"
+                    );
+
+                for (
+                   uint8_t axis = 0;
+                    axis < 4;
+                    ++axis
+                ) {
+                observedCounts.add(
+                        motors->encCounts[axis]
+                    );
+                }
+
+                serializeJson(response, *io);
+                io->println();
+
+                return;
+            }
+
+            encoderSession_->transactionSucceeded(source, transactionId);
+            const float confirmedMm = motors->getRobotRearDistanceMM();
+            response["ok"] = true;
+            response["valid"] = true;
+            response["rear_distance_mm"] = confirmedMm;
+            response["radius_m"] = confirmedMm / 1000.0f;
+            response["encoder_read_mask"] = motors->encoderReadValidMask();
+            JsonArray counts = response.createNestedArray("counts");
+            for (int i = 0; i < 4; ++i) counts.add(motors->encCounts[i]);
+            serializeJson(response, *io); io->println();
             emitEncoderStatus();
         }
         else if (action.equalsIgnoreCase("STOP")) {
@@ -645,24 +826,56 @@ public:
         else if (action.equalsIgnoreCase("get_firmware")) {
             Version::printJson(*io);
         }
+        else if (action.equalsIgnoreCase("get_firmware_features")) {
+            emitFirmwareFeatures();
+        }
         else if (action.equalsIgnoreCase("start_process")) {
-            if (ultrasonicEnabled_) *ultrasonicEnabled_ = true;
+            if (!ultrasonicEnabled_) {
+                emitProcessStatus(
+                    false,
+                    "ultrasonic_process_not_attached"
+                );
+                return;
+            }
+
+            if (actuator && actuator->hasPCBFault()) {
+                *ultrasonicEnabled_ = false;
+                motors->BRAKE_STOP();
+
+                emitProcessStatus(
+                    false,
+                    "actuator_dac_adc_disconnected"
+                );
+                return;
+            }
+
+            *ultrasonicEnabled_ = true;
+
             if (ultrasonic_) {
                 ultrasonic_->processSpeed = 0.0f;
                 ultrasonic_->currentSpeed = 0.0f;
             }
 
-            StaticJsonDocument<64> response;
-            response["status"] = "process_started";
-            serializeJson(response, *io); io->println();
+            emitProcessStatus(
+                true,
+                "operator_start"
+            );
         }
         else if (action.equalsIgnoreCase("stop_process")) {
-            if (ultrasonicEnabled_) *ultrasonicEnabled_ = false;
+            if (ultrasonicEnabled_) {
+                *ultrasonicEnabled_ = false;
+            }
+
             motors->STOP();
 
-            StaticJsonDocument<64> response;
-            response["status"] = "process_stopped";
-            serializeJson(response, *io); io->println();
+            if (ultrasonicServo_) {
+                ultrasonicServo_->deactivate();
+            }
+
+            emitProcessStatus(
+                false,
+                "operator_stop"
+            );
         }
         else if (action.equalsIgnoreCase("set_speed")) {
             float speed = jsonPacket["speed"] | 0.0f;
@@ -675,6 +888,22 @@ public:
             response["status"] = "speed_set";
             response["speed"]  = speed;
             serializeJson(response, *io); io->println();
+        }
+        else if (action.equalsIgnoreCase("stop_process")) {
+            if (ultrasonicEnabled_) {
+                *ultrasonicEnabled_ = false;
+            }
+
+            motors->BRAKE_STOP();
+
+            if (ultrasonicServo_) {
+                ultrasonicServo_->deactivate();
+            }
+
+            emitProcessStatus(
+                false,
+                "operator_stop"
+            );
         }
         else if (action.equalsIgnoreCase("shutdown")) {
             motors->STOP();
@@ -802,56 +1031,231 @@ public:
     }
     
     void checkTriggers() {
-        int currentPos = motors->getRobotRearDistanceMM();
-        unsigned long now = millis();
+        if (!actuator || !motors) {
+            return;
+        }
+
+        const int currentPos = motors->getRobotRearDistanceMM();
+        const unsigned long now = millis();
 
         for (auto& trig : triggerBuffer) {
-            // Activation
-            if (!trig.triggered && currentPos >= trig.threshold) {
+            /*
+            * Phase 1: Activate the new actuator when the encoder
+            * reaches the configured threshold.
+            */
+            if (!trig.triggered &&
+                currentPos >= trig.threshold) {
 
-                actuator->actuatorPositions[trig.activate_channel] = 4.4;
-                trig.triggerTime        = now;
-                trig.waitingToDeactivate= true;
-                trig.triggered          = true;
+                const int activateChannel =
+                    trig.activate_channel;
 
-                StaticJsonDocument<128> response;
+                if (activateChannel < 0 ||
+                    activateChannel >= NUM_ACTUATORS) {
+
+                    StaticJsonDocument<192> error;
+
+                    error["type"] = "error";
+                    error["module"] = "actuator";
+                    error["error"] =
+                        "invalid_trigger_activate_channel";
+                    error["channel"] = activateChannel;
+                    error["threshold"] = trig.threshold;
+
+                    serializeJson(error, *io);
+                    io->println();
+
+                    // Prevent this invalid trigger from reporting
+                    // the same error on every state-machine cycle.
+                    trig.triggered = true;
+                    trig.waitingToDeactivate = false;
+                    continue;
+                }
+
+                const float activeVoltage = constrain(
+                    4.4f,
+                    0.0f,
+                    CFG.actuator.maxCommandVoltage
+                );
+
+                actuator->actuatorPositions[activateChannel] =
+                    activeVoltage;
+
+                // Physically command the actuator.
+                actuator->writeDAC(
+                    static_cast<uint8_t>(activateChannel),
+                    activeVoltage
+                );
+
+                trig.triggerTime = now;
+                trig.waitingToDeactivate = true;
+                trig.triggered = true;
+
+                // Force telemetry after the command state changes.
+                emitActuatorStatus(true);
+
+                StaticJsonDocument<256> response;
+
+                response["type"] = "trigger_event";
+                response["event"] = "activated";
                 response["trigger_reached"] = true;
-                response["channel"]         = trig.activate_channel;
-                response["value"]           = trig.threshold;
+                response["channel"] = activateChannel;
+                response["deactivate_channel"] =
+                    trig.deactivate_channel;
+                response["threshold"] = trig.threshold;
+                response["current_position_mm"] = currentPos;
+                response["command_voltage"] = activeVoltage;
+                response["delay_seconds"] = trig.delay_seconds;
+                response["commanded_mask"] =
+                    actuator->commandedActiveMask();
+                response["feedback_mask"] =
+                    actuator->feedbackActiveMask();
+                response["pcb_fault"] =
+                    actuator->hasPCBFault();
+
                 serializeJson(response, *io);
                 io->println();
             }
 
-            // Deactivation after delay
-            if (trig.waitingToDeactivate &&
-                (now - trig.triggerTime >= (unsigned long)(trig.delay_seconds * 1000))) {
+            /*
+            * Phase 2: After the configured delay, deactivate
+            * the previous actuator.
+            *
+            * This must be outside the activation block because
+            * it is evaluated on later state-machine iterations.
+            */
+            if (trig.waitingToDeactivate) {
+                const float safeDelaySeconds =
+                    trig.delay_seconds < 0.0f
+                        ? 0.0f
+                        : trig.delay_seconds;
 
-                actuator->actuatorPositions[trig.deactivate_channel] = 0.0;
-                trig.waitingToDeactivate = false;
+                const unsigned long delayMs =
+                    static_cast<unsigned long>(
+                        safeDelaySeconds * 1000.0f
+                    );
 
-                StaticJsonDocument<128> response;
-                response["trigger_deactivated"] = true;
-                response["channel"]             = trig.deactivate_channel;
-                serializeJson(response, *io);
-                io->println();
+                // Unsigned subtraction remains safe across millis() rollover.
+                if ((unsigned long)(now - trig.triggerTime) >=
+                    delayMs) {
+
+                    const int deactivateChannel =
+                        trig.deactivate_channel;
+
+                    if (deactivateChannel < 0 ||
+                        deactivateChannel >= NUM_ACTUATORS) {
+
+                        StaticJsonDocument<192> error;
+
+                        error["type"] = "error";
+                        error["module"] = "actuator";
+                        error["error"] =
+                            "invalid_trigger_deactivate_channel";
+                        error["channel"] = deactivateChannel;
+                        error["threshold"] = trig.threshold;
+
+                        serializeJson(error, *io);
+                        io->println();
+
+                        // End the pending operation so the error
+                        // is not emitted continuously.
+                        trig.waitingToDeactivate = false;
+                        continue;
+                    }
+
+                    const float inactiveVoltage = 0.0f;
+
+                    actuator->actuatorPositions[deactivateChannel] =
+                        inactiveVoltage;
+
+                    // Physically command the previous actuator to retract.
+                    actuator->writeDAC(
+                        static_cast<uint8_t>(deactivateChannel),
+                        inactiveVoltage
+                    );
+
+                    trig.waitingToDeactivate = false;
+
+                    // Force telemetry after deactivation.
+                    emitActuatorStatus(true);
+
+                    StaticJsonDocument<256> response;
+
+                    response["type"] = "trigger_event";
+                    response["event"] = "deactivated";
+                    response["trigger_deactivated"] = true;
+                    response["channel"] = deactivateChannel;
+                    response["activated_channel"] =
+                        trig.activate_channel;
+                    response["threshold"] = trig.threshold;
+                    response["current_position_mm"] = currentPos;
+                    response["command_voltage"] =
+                        inactiveVoltage;
+                    response["elapsed_ms"] =
+                        static_cast<unsigned long>(
+                            now - trig.triggerTime
+                        );
+                    response["commanded_mask"] =
+                        actuator->commandedActiveMask();
+                    response["feedback_mask"] =
+                        actuator->feedbackActiveMask();
+                    response["pcb_fault"] =
+                        actuator->hasPCBFault();
+
+                    serializeJson(response, *io);
+                    io->println();
+                }
             }
         }
     }
 
     void emitEncoderStatus() {
+        StaticJsonDocument<384> doc;
+        const float rearMm = motors->getRobotRearDistanceMM();
+        doc["type"] = "encoder";
+        doc["valid"] = encoderSession_ ? encoderSession_->valid() : false;
+        doc["encoder_session_id"] = encoderSession_ ? encoderSession_->sessionId() : 0;
+        doc["motor_power_present"] = encoderSession_ ? encoderSession_->motorPowerPresent() : false;
+        doc["restore_required"] = encoderSession_ ? encoderSession_->restoreRequired() : true;
+        doc["encoder_read_mask"] = motors->encoderReadValidMask();
+        doc["radius_m"] = rearMm / 1000.0f;
+        doc["rear_distance_mm"] = rearMm;
+        doc["ts_ms"] = millis();
+        JsonArray counts = doc.createNestedArray("counts");
+        for (int i = 0; i < 4; ++i) counts.add(motors->encCounts[i]);
+        serializeJson(doc, *io); io->println();
+    }
+
+    void emitProcessStatus(
+        bool active,
+        const char* reason = nullptr
+    ) {
+        StaticJsonDocument<192> doc;
+
+        doc["type"] = "process_status";
+        doc["state"] = active ? "running" : "stopped";
+        doc["active"] = active;
+        doc["ts_ms"] = millis();
+
+        if (reason && reason[0] != '\0') {
+            doc["reason"] = reason;
+        }
+
+        serializeJson(doc, *io);
+        io->println();
+    }
+
+    void emitFirmwareFeatures()
+    {
         StaticJsonDocument<256> doc;
 
-        const float rearMm = motors->getRobotRearDistanceMM();
-        const float radiusM = rearMm / 1000.0f;
-
-        doc["type"] = "encoder";
-        doc["radius_m"] = radiusM;
-        doc["rear_distance_mm"] = rearMm;
-
-        JsonArray counts = doc.createNestedArray("counts");
-        for (int i = 0; i < 4; i++) {
-            counts.add(motors->encCounts[i]);
-        }
+        doc["type"] = "firmware_features";
+        doc["actuator_status"] = true;
+        doc["encoder_status"] = true;
+        doc["main_loop_heartbeat"] = true;
+        doc["loop_checkpoints"] = true;
+        doc["build_date"] = __DATE__;
+        doc["build_time"] = __TIME__;
+        doc["uptime_ms"] = millis();
 
         serializeJson(doc, *io);
         io->println();
