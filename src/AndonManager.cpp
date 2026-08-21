@@ -59,9 +59,11 @@ AndonManager::AndonManager(AndonLight& light,
                            UltrasonicServo& ut_servo,
                            EStop& estop,
                            ClampSensor& clamp,
+                           bool& hmiConnected,
                            Config cfg)
 : light_(light), link_(link), motors_(motors), actuator_(actuator),
-  jog_(jog), battery_(battery), ultrasonic_(ultrasonic), ut_servo_(ut_servo), cfg_(cfg), estop_(estop), clamp_(clamp) {}
+  jog_(jog), battery_(battery), ultrasonic_(ultrasonic), ut_servo_(ut_servo),
+  cfg_(cfg), estop_(estop), clamp_(clamp), hmi_connected_(hmiConnected) {}
 
 
 void AndonManager::setup() {
@@ -129,11 +131,12 @@ void AndonManager::tick() {
 
 // ----- Priority resolver -----
 AndonLight::States AndonManager::compute(uint32_t /*now*/) {
-  if (isEStop())                return AndonLight::RED;  
+  if (isEStop())                return AndonLight::RED;
   if (hasFault())               return AndonLight::BLINK_RED;
   if (isJogging())              return AndonLight::BLINK_BLUE;
   if (isActuatorDisconnected()) return AndonLight::BLUE;
   if (isCommsLost())            return AndonLight::YELLOW;
+  if (isHmiDisconnected())      return AndonLight::YELLOW;
   if (isBlockedOrStarved())     return AndonLight::BLINK_YELLOW;
   if (isBatteryLow())           return AndonLight::BLINK_YELLOW;
   if (isRunning())              return AndonLight::BLINK_GREEN;
@@ -202,6 +205,10 @@ bool AndonManager::isCommsLost() const {
   // Prefer a helper on MySerial to avoid using its internals here
   //if (millis() < startup_grace_until_) return false;
   return !link_.commsAlive();
+}
+
+bool AndonManager::isHmiDisconnected() const {
+  return !hmi_connected_;
 }
 
 bool AndonManager::isBlockedOrStarved() const {

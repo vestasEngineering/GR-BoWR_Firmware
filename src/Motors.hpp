@@ -14,7 +14,7 @@ public:
     // ------------------------------------------------------------
     static constexpr uint8_t  ADDR_A = 0x80;
     static constexpr uint8_t  ADDR_B = 0x80;
-    static constexpr uint32_t BAUD   = 38400;
+    static constexpr uint32_t BAUD   = 19200;
 
     // Motor command update rate.
     uint16_t commandHz = 200;

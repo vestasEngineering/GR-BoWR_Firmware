@@ -22,8 +22,7 @@ public:
   };
 
   static constexpr Config kDefaultCfg{100, 200, 3000};
-  
-  // ---- Fault taxonomy for module-specific reporting ----
+
   enum class FaultCode : uint8_t {
     BatteryCritical,
     UltrasonicPersistent,
@@ -46,6 +45,7 @@ public:
                UltrasonicServo& ut_servo,
                EStop& estop,
                ClampSensor& clamp,
+               bool& hmiConnected,
                Config cfg = kDefaultCfg);
 
   void setup();
@@ -61,6 +61,7 @@ private:
   bool isEStop() const;
   bool hasFault() const;
   bool isCommsLost() const;
+  bool isHmiDisconnected() const;
   bool isBlockedOrStarved() const;
   bool isJogging() const;
   bool isActuatorDisconnected() const;
@@ -68,13 +69,10 @@ private:
   bool isBatteryLow() const;
   bool isRunning() const;
 
-  
-  // --- UT Servo jam-check state ---
-  mutable bool     ut_verify_done_{false};     // true once verified OK in this ACTIVE cycle
-  mutable bool     ut_verify_passed_{false};   // true if we saw enough good readings
-  mutable uint32_t ut_active_since_ms_{0};     // ACTIVE start time
-  mutable uint16_t ut_good_consec_{0};         // consecutive good distance readings in window
-
+  mutable bool     ut_verify_done_{false};
+  mutable bool     ut_verify_passed_{false};
+  mutable uint32_t ut_active_since_ms_{0};
+  mutable uint16_t ut_good_consec_{0};
 
   void collectFaults(std::vector<FaultCode>& out) const;
 
@@ -87,8 +85,9 @@ private:
   Ultrasonic&        ultrasonic_;
   UltrasonicServo&   ut_servo_;
   Config             cfg_;
-  EStop&            estop_;
-  ClampSensor&      clamp_;
+  EStop&             estop_;
+  ClampSensor&       clamp_;
+  bool&               hmi_connected_;
 
   uint32_t           last_tick_ms_{0};
   uint32_t           last_change_ms_{0};

@@ -27,7 +27,9 @@ Motors motors(&roboclaw_uart_a, &roboclaw_uart_b);
 #include <Ultrasonic.hpp>
 Ultrasonic ultrasonic;
 bool ultrasonicEnabled = false;
+bool hmiConnected = false;
   
+
 #include <UltrasonicServo.hpp>
 UltrasonicServo ultrasonicServo;
 
@@ -58,9 +60,13 @@ BatteryMonitor batteryMonitor(myUART0);
 JogControl jogControl(motors, mySerial);
 
 #include "AndonManager.hpp"
-AndonManager andonMgr(andonLight, mySerial, motors, actuator, jogControl, batteryMonitor, ultrasonic, ultrasonicServo, estop, clamp);
+AndonManager andonMgr(andonLight, mySerial, motors, actuator, jogControl, batteryMonitor, ultrasonic, ultrasonicServo, estop, clamp, hmiConnected);
 
+#include "DiagnosticRunner.hpp"
+DiagnosticRunner diagnosticRunner(myUART0, motors, actuator, batteryMonitor, ultrasonic, ultrasonicServo, andonMgr, estop, clamp, jogControl, ultrasonicEnabled
+);
 #include "BootHealth.hpp"
+bool runtimeReadyPublished = false;
 
 #include "stm32h7xx_hal_rcc.h"
 
@@ -175,6 +181,7 @@ void setup() {
   delay(200);
   mySerial.setup();
   mySerial.attachEncoderSession(encoderSession);
+  mySerial.attachHmiConnectionState(hmiConnected);
   motors.begin();
   contactor.setup();
   encoderSession.setup();
@@ -193,6 +200,9 @@ void setup() {
 
   jogControl.setup();
   mySerial.attachJogControl(jogControl);
+  mySerial.attachDiagnosticRunner(
+      diagnosticRunner
+  );
   batteryMonitor.setup();
   clamp.setup();
   andonLight.setup();
@@ -294,6 +304,17 @@ void loop() {
 
     // Process incoming commands.
     mySerial.stateMachine();
+    diagnosticRunner.update();
+
+    if (!runtimeReadyPublished) {
+      runtimeReadyPublished = true;
+      myUART0.println(
+      "{\"type\":\"status\","
+      "\"module\":\"runtime\","
+      "\"status\":\"runtime_ready\"}"
+      );
+    }
+  
     mySerial.emitActuatorStatus();
 
     // Apply hard safety conditions before accepting motion commands.
@@ -301,21 +322,25 @@ void loop() {
 
     const bool actuatorConnected = !actuator.hasPCBFault();
 
-    if (
+    if (diagnosticRunner.active()) {
+        ultrasonic.servoSettleDelay = 0;
+    }
+    else if (
         ultrasonicEnabled &&
         actuatorConnected &&
         !actuatorDisconnectActive
     ) {
-        // DAC and ADC are connected:
-        // ultrasonic control owns the motor command.
         ultrasonicServo.activate();
-        ultrasonic.stateMachine();
-    } else {
-        // DAC/ADC disconnected, or ultrasonic process not enabled:
-        // ultrasonic control does not run and jog owns the command.
+
+        jogControl.update();
+
+        if (!jogControl.isActive()) {
+            ultrasonic.stateMachine();
+        }
+    }
+    else {
         ultrasonicServo.deactivate();
         ultrasonic.servoSettleDelay = 0;
-
         jogControl.update();
     }
 

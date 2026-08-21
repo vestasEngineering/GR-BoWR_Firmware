@@ -17,8 +17,8 @@ public:
     enum class Pull : uint8_t { None, Pullup, Pulldown };
 
     uint8_t     pin        = D0;              // GPIO input
-    bool        activeHigh = false;           // false => LOW means ACTIVE
-    Pull        pull       = Pull::Pullup;    // Pull-up typical for active-low wiring
+    bool        activeHigh = true;           // false => LOW means ACTIVE
+    Pull        pull       = Pull::Pulldown;    // Pull-up typical for active-low wiring
     bool        latch      = false;           // Software latch until clearLatch()
   };
 

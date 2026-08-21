@@ -15,6 +15,8 @@
 #include "JogControl.hpp"
 #include "Version.hpp"
 #include "EncoderSession.hpp"
+#include "DiagnosticRunner.hpp"
+
 
 class AndonManager;
 class Ultrasonic;
@@ -38,6 +40,9 @@ public:
     bool serialStarted = false;
     bool serialEnded   = false;
     bool LED_STATE     = false; // optional latch if you want a heartbeat LED
+    bool* hmiConnected_ = nullptr;
+    bool triggerEvaluationSuspended = false;
+
 
     unsigned long lastEncoderEmitMs = 0;
     static constexpr unsigned long encoderEmitPeriodMs = 500;
@@ -74,6 +79,7 @@ public:
     Stream* io = nullptr;
     JogControl* jogControl = nullptr;
     EncoderSession* encoderSession_ = nullptr;
+    DiagnosticRunner* diagnosticRunner_ = nullptr;
 
 
     
@@ -102,9 +108,19 @@ public:
 
     void attachEncoderSession(EncoderSession& session) { encoderSession_ = &session; }
 
+    void attachDiagnosticRunner(
+        DiagnosticRunner& runner
+    ) {
+        diagnosticRunner_ = &runner;
+    }
+
     // Helper for AndonManager: "is comms alive recently?"
     bool commsAlive() const {
         return timeout > 0;
+    }
+
+    void attachHmiConnectionState(bool& connectedFlag) {
+        hmiConnected_ = &connectedFlag;
     }
 
     //Helper: emit test result over serial for HMI
@@ -535,7 +551,28 @@ public:
         if (!jsonPacket.containsKey("action")) return;
         String action = jsonPacket["action"];
 
-        if (action.equalsIgnoreCase("set_voltage")) {
+        if (action.equalsIgnoreCase("set_hmi_connected")) {
+            if (!hmiConnected_) {
+                io->println(
+                    "{\"type\":\"error\","
+                    "\"error\":\"hmi_connection_state_not_attached\"}"
+                );
+                return;
+            }
+
+            const bool connected = jsonPacket["connected"] | false;
+            *hmiConnected_ = connected;
+
+            StaticJsonDocument<128> response;
+            response["type"] = "hmi_connection_status";
+            response["connected"] = connected;
+            response["ts_ms"] = millis();
+
+            serializeJson(response, *io);
+            io->println();
+        }
+
+        else if (action.equalsIgnoreCase("set_voltage")) {
             int channel = jsonPacket["channel"] | -1;
             float voltage = jsonPacket["voltage"] | 0.0f;
             actuator->actuatorPositions[channel] = voltage;
@@ -659,14 +696,50 @@ public:
 
             encoderSession_->transactionSucceeded(source, transactionId);
             const float confirmedMm = motors->getRobotRearDistanceMM();
+
+            StaticJsonDocument<384> triggerResult;
+            const bool triggersReconciled = reconcileTriggersToPosition_(
+                static_cast<int>(confirmedMm),
+                triggerResult
+            );
+
+            if (!triggersReconciled) {
+                encoderSession_->transactionFailed(
+                    "trigger_reconciliation_failed",
+                    transactionId
+                );
+
+                response["ok"] = false;
+                response["valid"] = false;
+                response["error"] = "trigger_reconciliation_failed";
+                response["rear_distance_mm"] = confirmedMm;
+                response["radius_m"] = confirmedMm / 1000.0f;
+                response["trigger_error"] = triggerResult["error"] | "unknown";
+                response["trigger_count"] = triggerBuffer.size();
+                serializeJson(response, *io);
+                io->println();
+                emitEncoderStatus();
+                return;
+            }
+
             response["ok"] = true;
             response["valid"] = true;
             response["rear_distance_mm"] = confirmedMm;
             response["radius_m"] = confirmedMm / 1000.0f;
             response["encoder_read_mask"] = motors->encoderReadValidMask();
+            response["triggers_reconciled"] = true;
+            response["trigger_count"] = triggerBuffer.size();
+            response["trigger_reached_count"] = triggerResult["reached_count"] | 0;
+            response["trigger_pending_count"] = triggerResult["pending_count"] | 0;
+            response["commanded_mask"] = triggerResult["commanded_mask"] | 0;
+
             JsonArray counts = response.createNestedArray("counts");
-            for (int i = 0; i < 4; ++i) counts.add(motors->encCounts[i]);
-            serializeJson(response, *io); io->println();
+            for (int i = 0; i < 4; ++i) {
+                counts.add(motors->encCounts[i]);
+            }
+
+            serializeJson(response, *io);
+            io->println();
             emitEncoderStatus();
         }
         else if (action.equalsIgnoreCase("STOP")) {
@@ -718,47 +791,143 @@ public:
             }
         }
         else if (action.equalsIgnoreCase("set_triggers")) {
-            bool shouldClear = jsonPacket["clear"] | false;
-            if (shouldClear) triggerBuffer.clear();
+            const bool shouldClear = jsonPacket["clear"] | false;
+            const bool begin = jsonPacket["begin"] | false;
+            const bool commit = jsonPacket["commit"] | false;
 
-            // Prefer single trigger
+            if (begin) {
+                triggerEvaluationSuspended = true;
+            }
+
+            if (shouldClear) {
+                triggerBuffer.clear();
+            }
+
+            bool valid = true;
+            const char* validationError = nullptr;
+
             if (jsonPacket.containsKey("trigger")) {
                 JsonObject t = jsonPacket["trigger"].as<JsonObject>();
-                if (t.containsKey("threshold") && t.containsKey("activate") &&
-                    t.containsKey("deactivate") && t.containsKey("delay")) {
+
+                if (
+                    t.containsKey("threshold") &&
+                    t.containsKey("activate") &&
+                    t.containsKey("deactivate") &&
+                    t.containsKey("delay")
+                ) {
                     Trigger trig;
-                    trig.threshold         = t["threshold"];
-                    trig.activate_channel  = t["activate"];
-                    trig.deactivate_channel= t["deactivate"];
-                    trig.delay_seconds     = t["delay"];
-                    triggerBuffer.push_back(trig);
+                    trig.threshold = t["threshold"];
+                    trig.activate_channel = t["activate"];
+                    trig.deactivate_channel = t["deactivate"];
+                    trig.delay_seconds = t["delay"];
+                    trig.triggered = false;
+                    trig.triggerTime = 0;
+                    trig.waitingToDeactivate = false;
+
+                    if (
+                        trig.threshold < 0 ||
+                        trig.activate_channel < 0 ||
+                        trig.activate_channel >= NUM_ACTUATORS ||
+                        trig.deactivate_channel < 0 ||
+                        trig.deactivate_channel >= NUM_ACTUATORS ||
+                        !isfinite(trig.delay_seconds) ||
+                        trig.delay_seconds < 0.0f
+                    ) {
+                        valid = false;
+                        validationError = "invalid_trigger_values";
+                    } else {
+                        triggerBuffer.push_back(trig);
+                    }
                 } else {
-                    io->println("{\"error\":\"Invalid single trigger format\"}");
+                    valid = false;
+                    validationError = "invalid_single_trigger_format";
                 }
             }
 
-            // Also support array
             if (jsonPacket.containsKey("triggers")) {
                 JsonArray arr = jsonPacket["triggers"].as<JsonArray>();
+
                 for (JsonObject t : arr) {
-                    if (t.containsKey("threshold") && t.containsKey("activate") &&
-                        t.containsKey("deactivate") && t.containsKey("delay")) {
-                        Trigger trig;
-                        trig.threshold          = t["threshold"];
-                        trig.activate_channel   = t["activate"];
-                        trig.deactivate_channel = t["deactivate"];
-                        trig.delay_seconds      = t["delay"];
-                        triggerBuffer.push_back(trig);
-                    } else {
-                        io->println("{\"error\":\"Invalid trigger format\"}");
+                    if (
+                        !t.containsKey("threshold") ||
+                        !t.containsKey("activate") ||
+                        !t.containsKey("deactivate") ||
+                        !t.containsKey("delay")
+                    ) {
+                        valid = false;
+                        validationError = "invalid_trigger_format";
+                        break;
                     }
+
+                    Trigger trig;
+                    trig.threshold = t["threshold"];
+                    trig.activate_channel = t["activate"];
+                    trig.deactivate_channel = t["deactivate"];
+                    trig.delay_seconds = t["delay"];
+                    trig.triggered = false;
+                    trig.triggerTime = 0;
+                    trig.waitingToDeactivate = false;
+
+                    if (
+                        trig.threshold < 0 ||
+                        trig.activate_channel < 0 ||
+                        trig.activate_channel >= NUM_ACTUATORS ||
+                        trig.deactivate_channel < 0 ||
+                        trig.deactivate_channel >= NUM_ACTUATORS ||
+                        !isfinite(trig.delay_seconds) ||
+                        trig.delay_seconds < 0.0f
+                    ) {
+                        valid = false;
+                        validationError = "invalid_trigger_values";
+                        break;
+                    }
+
+                    triggerBuffer.push_back(trig);
                 }
             }
 
-            StaticJsonDocument<64> response;
+            if (!valid) {
+                StaticJsonDocument<192> response;
+                response["status"] = "trigger_load_failed";
+                response["ok"] = false;
+                response["error"] = validationError;
+                response["count"] = triggerBuffer.size();
+                response["ts_ms"] = millis();
+                serializeJson(response, *io);
+                io->println();
+                return;
+            }
+
+            if (commit) {
+                StaticJsonDocument<384> response;
+                const int currentPositionMm = motors
+                    ? static_cast<int>(motors->getRobotRearDistanceMM())
+                    : 0;
+
+                const bool reconciled = reconcileTriggersToPosition_(
+                    currentPositionMm,
+                    response
+                );
+
+                // Resume evaluation only after a valid committed table has been
+                // reconciled. On failure, remain suspended to avoid partial behavior.
+                if (reconciled) {
+                    triggerEvaluationSuspended = false;
+                }
+
+                serializeJson(response, *io);
+                io->println();
+                return;
+            }
+
+            StaticJsonDocument<128> response;
             response["status"] = "triggers_loaded";
-            response["count"]  = triggerBuffer.size();
-            serializeJson(response, *io); io->println();
+            response["ok"] = true;
+            response["count"] = triggerBuffer.size();
+            response["loading"] = triggerEvaluationSuspended;
+            response["ts_ms"] = millis();
+            serializeJson(response, *io);
+            io->println();
         }
         else if (action.equalsIgnoreCase("set_motor_tuning")) {
             int32_t maxSpeed = jsonPacket["max_speed"] | 2500;
@@ -861,12 +1030,16 @@ public:
                 "operator_start"
             );
         }
-        else if (action.equalsIgnoreCase("stop_process")) {
+        else if (
+            action.equalsIgnoreCase(
+                "stop_process"
+            )
+        ) {
             if (ultrasonicEnabled_) {
                 *ultrasonicEnabled_ = false;
             }
 
-            motors->STOP();
+            motors->BRAKE_STOP();
 
             if (ultrasonicServo_) {
                 ultrasonicServo_->deactivate();
@@ -889,22 +1062,6 @@ public:
             response["speed"]  = speed;
             serializeJson(response, *io); io->println();
         }
-        else if (action.equalsIgnoreCase("stop_process")) {
-            if (ultrasonicEnabled_) {
-                *ultrasonicEnabled_ = false;
-            }
-
-            motors->BRAKE_STOP();
-
-            if (ultrasonicServo_) {
-                ultrasonicServo_->deactivate();
-            }
-
-            emitProcessStatus(
-                false,
-                "operator_stop"
-            );
-        }
         else if (action.equalsIgnoreCase("shutdown")) {
             motors->STOP();
             if (ultrasonicEnabled_) *ultrasonicEnabled_ = false;
@@ -915,49 +1072,70 @@ public:
             response["status"] = "shutdown_complete";
             serializeJson(response, *io); io->println();
         }
-        else if (action.equalsIgnoreCase("test_motor")) {
-            int index = jsonPacket["index"] | 0;
-            float speed = jsonPacket["speed"] | 0.02f;       
-            unsigned long dur = jsonPacket["duration_ms"] | 600;
-            const char* id = jsonPacket["id"] | "motor_0";
-           runTestMotor(id, index, speed, dur);
-        }
-        else if (action.equalsIgnoreCase("test_actuator")) {
-            int channel = jsonPacket["channel"] | 0;
-            float v = jsonPacket["voltage"] | 2.5f;
-            float tol = jsonPacket["tolerance"] | 0.3f;
-            unsigned long settle = jsonPacket["settle_ms"] | 300;
-            const char* id = jsonPacket["id"] | "actuator_0";
-            runTestActuator(id, channel, v, tol, settle);
-        }
-        else if (action.equalsIgnoreCase("test_sensor")) {
-            const char* sensor = jsonPacket["sensor"] | "ultrasonic";
-            const char* id = jsonPacket["id"] | sensor;
-            if (strcasecmp(sensor, "ultrasonic") == 0) {
-                runTestUltrasonic(id);
-            } else if (strcasecmp(sensor, "battery") == 0) {
-                runTestBattery(id);
-            } else if (strcasecmp(sensor, "digital") == 0) {
-                int pin = jsonPacket["pin"] | D1;
-                bool expectHigh = jsonPacket["expect"] | true;
-                unsigned long sample = jsonPacket["sample_ms"] | 300;
-                runTestDigitalPin(id, pin, expectHigh, sample);
-            } else {
-                StaticJsonDocument<80> err;
-                err["type"] = "test_result";
-                err["id"] = id;
-                err["pass"] = false;
-                err["reason"] = "unknown_sensor";
-                serializeJson(err, *io); io->println();
+        else if (
+            action.equalsIgnoreCase("test_motor") ||
+            action.equalsIgnoreCase("test_actuator") ||
+            action.equalsIgnoreCase("test_sensor") ||
+            action.equalsIgnoreCase("test_servo")
+        ) {
+            if (!diagnosticRunner_) {
+                StaticJsonDocument<320> response;
+
+                response["type"] = "test_result";
+                response["id"] = jsonPacket["id"] | "";
+                response["category"] = "diagnostic";
+                response["run_id"] = jsonPacket["run_id"] | "";
+                response["transaction_id"] =
+                    jsonPacket["transaction_id"] | "";
+                response["pass"] = false;
+                response["reason"] =
+                    "diagnostic_runner_not_attached";
+
+                response.createNestedObject(
+                    "measurements"
+                );
+
+                serializeJson(response, *io);
+                io->println();
+                return;
             }
+
+            diagnosticRunner_->start(
+                jsonPacket
+            );
         }
-        else if (action.equalsIgnoreCase("test_light")) {
-            const char* id = jsonPacket["id"] | "andon_ring";
-            runTestAndon(id);
-        }
-        else if (action.equalsIgnoreCase("test_servo")) {
-            const char* id = jsonPacket["id"] | "ultrasonic_servo";
-            runTestUltrasonicServo(id);
+        else if (
+            action.equalsIgnoreCase(
+                "abort_diagnostic"
+            )
+        ) {
+            const char* runId =
+                jsonPacket["run_id"] | "";
+
+            const bool accepted =
+                diagnosticRunner_ &&
+                diagnosticRunner_->abort(
+                    runId
+                );
+
+            StaticJsonDocument<224> response;
+
+            response["type"] =
+                accepted ? "ack" : "error";
+
+            response["id"] =
+                "abort_diagnostic";
+
+            response["ok"] = accepted;
+            response["run_id"] = runId;
+
+            if (!accepted) {
+                response["error"] =
+                    "diagnostic_abort_rejected";
+            }
+
+            serializeJson(response, *io);
+            io->println();
         }
         else if (action.equalsIgnoreCase("ping")) {
             StaticJsonDocument<128> response;
@@ -968,70 +1146,85 @@ public:
         }
         else if (action.equalsIgnoreCase("jog")) {
             if (!jogControl) {
-                StaticJsonDocument<128> err;
-                err["type"] = "error";
-                err["id"] = "jog";
-                err["error"] = "jog_not_attached";
-                serializeJson(err, *io); io->println();
+                StaticJsonDocument<192> response;
+                response["type"] = "jog_status";
+                response["id"] = "jog";
+                response["ok"] = false;
+                response["accepted"] = false;
+                response["active"] = false;
+                response["reason"] = "jog_not_attached";
+                serializeJson(response, *io);
+                io->println();
                 return;
             }
 
+            const char* sessionId = jsonPacket["jog_session_id"] | "";
             const char* dirStr = jsonPacket["dir"] | "";
-            int dir = 0;
+            int direction = 0;
 
             if (strcasecmp(dirStr, "forward") == 0) {
-                dir = 1;
+                direction = 1;
             } else if (strcasecmp(dirStr, "backward") == 0) {
-                dir = -1;
-            } else {
-                StaticJsonDocument<128> err;
-                err["type"] = "error";
-                err["id"] = "jog";
-                err["error"] = "invalid_direction";
-                serializeJson(err, *io); io->println();
-                return;
+                direction = -1;
             }
 
-            float speed = jsonPacket["speed"] | CFG.jog.jog_speed_max_ms;
-            unsigned long leaseMs = jsonPacket["lease_ms"] | 250;
-            uint32_t seq = jsonPacket["seq"] | 0;
+            const float speed = jsonPacket["speed"] | CFG.jog.jog_speed_max_ms;
+            const unsigned long leaseMs = jsonPacket["lease_ms"] | 250;
+            const uint32_t seq = jsonPacket["seq"] | 0;
 
-            bool ok = jogControl->startOrRefreshRemoteJog(
-                dir,
-                speed,
-                leaseMs,
-                seq
-            );
+            const JogControl::RemoteJogResult result =
+                jogControl->startOrRefreshRemoteJog(
+                    sessionId,
+                    direction,
+                    speed,
+                    leaseMs,
+                    seq
+                );
 
-            StaticJsonDocument<160> response;
-            response["type"] = ok ? "ack" : "error";
+            const bool accepted =
+                result == JogControl::RemoteJogResult::ACCEPTED;
+
+            StaticJsonDocument<256> response;
+            response["type"] = "jog_status";
             response["id"] = "jog";
-            response["ok"] = ok;
+            response["ok"] = accepted;
+            response["accepted"] = accepted;
+            response["active"] = accepted && jogControl->isRemoteActive();
+            response["jog_session_id"] = sessionId;
             response["seq"] = seq;
+            response["direction"] = dirStr;
+            response["reason"] = JogControl::remoteJogResultToString(result);
+            response["motion_inhibited"] = motors->isMotionInhibited();
+            response["last_accepted_seq"] =
+                jogControl->lastAcceptedRemoteSequence();
 
-            if (!ok) {
-                response["error"] = "jog_rejected";
-            }
-
-            serializeJson(response, *io); io->println();
+            serializeJson(response, *io);
+            io->println();
         }
         else if (action.equalsIgnoreCase("jog_stop")) {
-            if (jogControl) {
-                uint32_t seq = jsonPacket["seq"] | 0;
-                jogControl->stopRemoteJog(seq);
+            const char* sessionId = jsonPacket["jog_session_id"] | "";
+            const uint32_t seq = jsonPacket["seq"] | 0;
+            const bool stopped = jogControl &&
+                jogControl->stopRemoteJog(sessionId, seq);
 
-                StaticJsonDocument<128> response;
-                response["type"] = "ack";
-                response["id"] = "jog_stop";
-                response["ok"] = true;
-                response["seq"] = seq;
-                serializeJson(response, *io); io->println();
-            }
+            StaticJsonDocument<224> response;
+            response["type"] = "jog_status";
+            response["id"] = "jog_stop";
+            response["ok"] = stopped;
+            response["accepted"] = stopped;
+            response["active"] = jogControl && jogControl->isRemoteActive();
+            response["jog_session_id"] = sessionId;
+            response["seq"] = seq;
+            response["reason"] = stopped ? "stopped" : "stop_rejected";
+            response["motion_inhibited"] = motors->isMotionInhibited();
+
+            serializeJson(response, *io);
+            io->println();
         }
     }
     
     void checkTriggers() {
-        if (!actuator || !motors) {
+        if (triggerEvaluationSuspended || !actuator || !motors) {
             return;
         }
 
@@ -1039,33 +1232,18 @@ public:
         const unsigned long now = millis();
 
         for (auto& trig : triggerBuffer) {
-            /*
-            * Phase 1: Activate the new actuator when the encoder
-            * reaches the configured threshold.
-            */
-            if (!trig.triggered &&
-                currentPos >= trig.threshold) {
+            if (!trig.triggered && currentPos >= trig.threshold) {
+                const int activateChannel = trig.activate_channel;
 
-                const int activateChannel =
-                    trig.activate_channel;
-
-                if (activateChannel < 0 ||
-                    activateChannel >= NUM_ACTUATORS) {
-
+                if (activateChannel < 0 || activateChannel >= NUM_ACTUATORS) {
                     StaticJsonDocument<192> error;
-
                     error["type"] = "error";
                     error["module"] = "actuator";
-                    error["error"] =
-                        "invalid_trigger_activate_channel";
+                    error["error"] = "invalid_trigger_activate_channel";
                     error["channel"] = activateChannel;
                     error["threshold"] = trig.threshold;
-
                     serializeJson(error, *io);
                     io->println();
-
-                    // Prevent this invalid trigger from reporting
-                    // the same error on every state-machine cycle.
                     trig.triggered = true;
                     trig.waitingToDeactivate = false;
                     continue;
@@ -1077,10 +1255,7 @@ public:
                     CFG.actuator.maxCommandVoltage
                 );
 
-                actuator->actuatorPositions[activateChannel] =
-                    activeVoltage;
-
-                // Physically command the actuator.
+                actuator->actuatorPositions[activateChannel] = activeVoltage;
                 actuator->writeDAC(
                     static_cast<uint8_t>(activateChannel),
                     activeVoltage
@@ -1089,118 +1264,76 @@ public:
                 trig.triggerTime = now;
                 trig.waitingToDeactivate = true;
                 trig.triggered = true;
-
-                // Force telemetry after the command state changes.
                 emitActuatorStatus(true);
 
                 StaticJsonDocument<256> response;
-
                 response["type"] = "trigger_event";
                 response["event"] = "activated";
                 response["trigger_reached"] = true;
                 response["channel"] = activateChannel;
-                response["deactivate_channel"] =
-                    trig.deactivate_channel;
+                response["deactivate_channel"] = trig.deactivate_channel;
                 response["threshold"] = trig.threshold;
                 response["current_position_mm"] = currentPos;
                 response["command_voltage"] = activeVoltage;
                 response["delay_seconds"] = trig.delay_seconds;
-                response["commanded_mask"] =
-                    actuator->commandedActiveMask();
-                response["feedback_mask"] =
-                    actuator->feedbackActiveMask();
-                response["pcb_fault"] =
-                    actuator->hasPCBFault();
-
+                response["commanded_mask"] = actuator->commandedActiveMask();
+                response["feedback_mask"] = actuator->feedbackActiveMask();
+                response["pcb_fault"] = actuator->hasPCBFault();
                 serializeJson(response, *io);
                 io->println();
             }
 
-            /*
-            * Phase 2: After the configured delay, deactivate
-            * the previous actuator.
-            *
-            * This must be outside the activation block because
-            * it is evaluated on later state-machine iterations.
-            */
             if (trig.waitingToDeactivate) {
-                const float safeDelaySeconds =
-                    trig.delay_seconds < 0.0f
-                        ? 0.0f
-                        : trig.delay_seconds;
+                const float safeDelaySeconds = trig.delay_seconds < 0.0f
+                    ? 0.0f
+                    : trig.delay_seconds;
+                const unsigned long delayMs = static_cast<unsigned long>(
+                    safeDelaySeconds * 1000.0f
+                );
 
-                const unsigned long delayMs =
-                    static_cast<unsigned long>(
-                        safeDelaySeconds * 1000.0f
-                    );
+                if ((unsigned long)(now - trig.triggerTime) >= delayMs) {
+                    const int deactivateChannel = trig.deactivate_channel;
 
-                // Unsigned subtraction remains safe across millis() rollover.
-                if ((unsigned long)(now - trig.triggerTime) >=
-                    delayMs) {
-
-                    const int deactivateChannel =
-                        trig.deactivate_channel;
-
-                    if (deactivateChannel < 0 ||
-                        deactivateChannel >= NUM_ACTUATORS) {
-
+                    if (
+                        deactivateChannel < 0 ||
+                        deactivateChannel >= NUM_ACTUATORS
+                    ) {
                         StaticJsonDocument<192> error;
-
                         error["type"] = "error";
                         error["module"] = "actuator";
-                        error["error"] =
-                            "invalid_trigger_deactivate_channel";
+                        error["error"] = "invalid_trigger_deactivate_channel";
                         error["channel"] = deactivateChannel;
                         error["threshold"] = trig.threshold;
-
                         serializeJson(error, *io);
                         io->println();
-
-                        // End the pending operation so the error
-                        // is not emitted continuously.
                         trig.waitingToDeactivate = false;
                         continue;
                     }
 
                     const float inactiveVoltage = 0.0f;
-
-                    actuator->actuatorPositions[deactivateChannel] =
-                        inactiveVoltage;
-
-                    // Physically command the previous actuator to retract.
+                    actuator->actuatorPositions[deactivateChannel] = inactiveVoltage;
                     actuator->writeDAC(
                         static_cast<uint8_t>(deactivateChannel),
                         inactiveVoltage
                     );
-
                     trig.waitingToDeactivate = false;
-
-                    // Force telemetry after deactivation.
                     emitActuatorStatus(true);
 
                     StaticJsonDocument<256> response;
-
                     response["type"] = "trigger_event";
                     response["event"] = "deactivated";
                     response["trigger_deactivated"] = true;
                     response["channel"] = deactivateChannel;
-                    response["activated_channel"] =
-                        trig.activate_channel;
+                    response["activated_channel"] = trig.activate_channel;
                     response["threshold"] = trig.threshold;
                     response["current_position_mm"] = currentPos;
-                    response["command_voltage"] =
-                        inactiveVoltage;
-                    response["elapsed_ms"] =
-                        static_cast<unsigned long>(
-                            now - trig.triggerTime
-                        );
-                    response["commanded_mask"] =
-                        actuator->commandedActiveMask();
-                    response["feedback_mask"] =
-                        actuator->feedbackActiveMask();
-                    response["pcb_fault"] =
-                        actuator->hasPCBFault();
-
+                    response["command_voltage"] = inactiveVoltage;
+                    response["elapsed_ms"] = static_cast<unsigned long>(
+                        now - trig.triggerTime
+                    );
+                    response["commanded_mask"] = actuator->commandedActiveMask();
+                    response["feedback_mask"] = actuator->feedbackActiveMask();
+                    response["pcb_fault"] = actuator->hasPCBFault();
                     serializeJson(response, *io);
                     io->println();
                 }
@@ -1261,6 +1394,95 @@ public:
         io->println();
     }
     
+    void commandActuatorState_(uint8_t channel, bool active) {
+        if (!actuator || channel >= NUM_ACTUATORS) {
+            return;
+        }
+
+        const float voltage = active
+            ? constrain(4.4f, 0.0f, CFG.actuator.maxCommandVoltage)
+            : 0.0f;
+
+        actuator->actuatorPositions[channel] = voltage;
+        actuator->writeDAC(channel, voltage);
+    }
+
+    bool reconcileTriggersToPosition_(
+        int currentPositionMm,
+        StaticJsonDocument<384>& result
+    ) {
+        result.clear();
+        result["status"] = "triggers_reconciled";
+        result["position_mm"] = currentPositionMm;
+        result["count"] = triggerBuffer.size();
+        result["ts_ms"] = millis();
+
+        if (!actuator) {
+            result["ok"] = false;
+            result["error"] = "actuator_not_attached";
+            return false;
+        }
+
+        // Rebuild a deterministic stable post-delay state. Start with every
+        // channel inactive, then replay only triggers already reached at the
+        // confirmed position. No historical delay is replayed.
+        for (uint8_t channel = 0; channel < NUM_ACTUATORS; ++channel) {
+            commandActuatorState_(channel, false);
+        }
+
+        size_t reachedCount = 0;
+        size_t pendingCount = 0;
+
+        for (auto& trig : triggerBuffer) {
+            trig.triggerTime = 0;
+            trig.waitingToDeactivate = false;
+
+            if (currentPositionMm < trig.threshold) {
+                trig.triggered = false;
+                ++pendingCount;
+                continue;
+            }
+
+            if (
+                trig.activate_channel < 0 ||
+                trig.activate_channel >= NUM_ACTUATORS ||
+                trig.deactivate_channel < 0 ||
+                trig.deactivate_channel >= NUM_ACTUATORS
+            ) {
+                result["ok"] = false;
+                result["error"] = "invalid_trigger_channel";
+                result["threshold"] = trig.threshold;
+                result["activate_channel"] = trig.activate_channel;
+                result["deactivate_channel"] = trig.deactivate_channel;
+                return false;
+            }
+
+            // Reconstruct the stable state after this trigger's delay completed.
+            commandActuatorState_(
+                static_cast<uint8_t>(trig.activate_channel),
+                true
+            );
+            commandActuatorState_(
+                static_cast<uint8_t>(trig.deactivate_channel),
+                false
+            );
+
+            trig.triggered = true;
+            ++reachedCount;
+        }
+
+        result["ok"] = true;
+        result["reached_count"] = reachedCount;
+        result["pending_count"] = pendingCount;
+        result["commanded_mask"] = actuator->commandedActiveMask();
+        result["feedback_mask"] = actuator->feedbackActiveMask();
+        result["jam_mask"] = actuator->jamMask();
+        result["pcb_fault"] = actuator->hasPCBFault();
+
+        emitActuatorStatus(true);
+        return true;
+    }
+
     //HMI Test Section
     void runTestMotor(const char* id, int index, float speed, unsigned long durationMs) {
     int apos0 = motors->getRobotRearDistanceMM();  // uses your averaged encoder mm

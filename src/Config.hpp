@@ -51,7 +51,7 @@ struct BatteryCfg {
     uint8_t oled_width          = 128;
     uint8_t oled_height         = 64;
     int     oled_reset_pin      = -1;
-    uint8_t oled_i2c_addr       = 0x3C;
+    uint8_t oled_i2c_addr       = 0x3D;
 
     uint32_t emit_ms            = 100000;
     float    emit_pct_delta     = 1.0f;
@@ -62,7 +62,7 @@ struct BatteryCfg {
 
 
 struct ClampCfg {
-    int       pin                 = D5;      // TLP785 output into Portenta H7
+    int       pin                 = D6;      // TLP785 output into Portenta H7
     bool      active_high         = true;    // HIGH = clamped OK
     uint16_t  debounce_ms         = 20;      // input debounce
     uint32_t  emit_ms             = 1000;    // optional telemetry cadence (if you want to emit)
