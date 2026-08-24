@@ -98,6 +98,45 @@ public:
         return motionInhibited_;
     }
 
+    struct MotorDiagnosticSnapshot {
+        int32_t encoderCount = 0;
+        int32_t speedQpps = 0;
+        int16_t pwm = 0;
+        int16_t currentMa = 0;
+        uint8_t encoderStatus = 0;
+        uint8_t speedStatus = 0;
+        uint32_t errorFlags = 0;
+        bool encoderValid = false;
+        bool speedValid = false;
+        bool pwmValid = false;
+        bool currentValid = false;
+        bool errorValid = false;
+    };
+
+    // Reads one axis and its controller diagnostics. Outputs are committed
+    // only from Basicmicro calls that returned valid CRC-checked responses.
+    bool readMotorDiagnostic(uint8_t axis, MotorDiagnosticSnapshot& snapshot);
+
+    // Expected raw encoder sign for a physical speed command, using the same
+    // motorDirection mapping used by sendSpeeds().
+    int8_t expectedEncoderDirection(uint8_t axis, float speedMps) const;
+
+    bool readMotorMotionFeedback(
+        uint8_t axis,
+        int32_t& encoderCount,
+        int32_t& speedQpps,
+        uint8_t& encoderStatus,
+        uint8_t& speedStatus
+    );
+
+    // Read the error/status word for the RoboClaw serving the selected axis.
+    // The simple motor test reports these flags as supplemental information;
+    // they do not determine pass/fail.
+    bool readControllerErrorFlags(
+        uint8_t axis,
+        uint32_t& errorFlags
+    );
+
     // ------------------------------------------------------------
     // Construction
     // ------------------------------------------------------------

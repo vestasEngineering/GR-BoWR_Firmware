@@ -1076,7 +1076,7 @@ public:
             action.equalsIgnoreCase("test_motor") ||
             action.equalsIgnoreCase("test_actuator") ||
             action.equalsIgnoreCase("test_sensor") ||
-            action.equalsIgnoreCase("test_servo")
+            action.equalsIgnoreCase("test_andon")
         ) {
             if (!diagnosticRunner_) {
                 StaticJsonDocument<320> response;

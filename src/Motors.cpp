@@ -317,6 +317,97 @@ void Motors::pollEncoders() {
     }
 }
 
+bool Motors::readMotorMotionFeedback(
+    uint8_t axis,
+    int32_t& encoderCount,
+    int32_t& speedQpps,
+    uint8_t& encoderStatus,
+    uint8_t& speedStatus
+) {
+    if (axis >= 4) {
+        return false;
+    }
+
+    Basicmicro& controller = axis < 2 ? rcA : rcB;
+    const uint8_t address = axis < 2 ? ADDR_A : ADDR_B;
+    const bool channelM1 = (axis & 1u) == 0u;
+
+    bool encoderValid = false;
+    bool speedValid = false;
+    uint8_t localEncoderStatus = 0;
+    uint8_t localSpeedStatus = 0;
+
+    const uint32_t encoderRaw = channelM1
+        ? controller.ReadEncM1(
+            address,
+            &localEncoderStatus,
+            &encoderValid
+        )
+        : controller.ReadEncM2(
+            address,
+            &localEncoderStatus,
+            &encoderValid
+        );
+
+    const uint32_t speedRaw = channelM1
+        ? controller.ReadSpeedM1(
+            address,
+            &localSpeedStatus,
+            &speedValid
+        )
+        : controller.ReadSpeedM2(
+            address,
+            &localSpeedStatus,
+            &speedValid
+        );
+
+    if (!encoderValid || !speedValid) {
+        return false;
+    }
+
+    // Commit outputs only after both responses passed their CRC checks.
+    encoderCount = static_cast<int32_t>(encoderRaw);
+    speedQpps = static_cast<int32_t>(speedRaw);
+    encoderStatus = localEncoderStatus;
+    speedStatus = localSpeedStatus;
+
+    // Keep the normal telemetry cache aligned with the direct diagnostic read.
+    encCounts[axis] = encoderCount;
+    qpps[axis] = speedQpps;
+    encStatus_[axis] = encoderStatus;
+    speedStatus_[axis] = speedStatus;
+    encValid_[axis] = true;
+    speedValid_[axis] = true;
+
+    return true;
+}
+
+bool Motors::readControllerErrorFlags(
+    uint8_t axis,
+    uint32_t& errorFlags
+) {
+    if (axis >= 4) {
+        return false;
+    }
+
+    Basicmicro& controller = axis < 2 ? rcA : rcB;
+    const uint8_t address = axis < 2 ? ADDR_A : ADDR_B;
+
+    bool valid = false;
+    const uint32_t value = controller.ReadError(
+        address,
+        &valid
+    );
+
+    if (!valid) {
+        return false;
+    }
+
+    errorFlags = value;
+    return true;
+}
+
+
 uint8_t Motors::encoderReadValidMask() const {
     uint8_t mask = 0;
     for (uint8_t i = 0; i < 4; ++i) {
@@ -742,4 +833,79 @@ void Motors::setRobotRearDistanceM(float meters) {
     }
 
     setRobotRearDistanceMM(meters * 1000.0f);
+}
+
+bool Motors::readMotorDiagnostic(
+    uint8_t axis,
+    MotorDiagnosticSnapshot& snapshot
+) {
+    if (axis >= 4) {
+        return false;
+    }
+
+    Basicmicro& controller = axis < 2 ? rcA : rcB;
+    const uint8_t address = axis < 2 ? ADDR_A : ADDR_B;
+    const bool channelM1 = (axis & 1u) == 0u;
+
+    MotorDiagnosticSnapshot sample{};
+    bool valid = false;
+    uint8_t status = 0;
+
+    const uint32_t encoderRaw = channelM1
+        ? controller.ReadEncM1(address, &status, &valid)
+        : controller.ReadEncM2(address, &status, &valid);
+    sample.encoderValid = valid;
+    sample.encoderStatus = status;
+    if (valid) sample.encoderCount = static_cast<int32_t>(encoderRaw);
+
+    valid = false;
+    status = 0;
+    const uint32_t speedRaw = channelM1
+        ? controller.ReadSpeedM1(address, &status, &valid)
+        : controller.ReadSpeedM2(address, &status, &valid);
+    sample.speedValid = valid;
+    sample.speedStatus = status;
+    if (valid) sample.speedQpps = static_cast<int32_t>(speedRaw);
+
+    int16_t pwm1 = 0;
+    int16_t pwm2 = 0;
+    sample.pwmValid = controller.ReadPWMs(address, pwm1, pwm2);
+    if (sample.pwmValid) sample.pwm = channelM1 ? pwm1 : pwm2;
+
+    int16_t current1 = 0;
+    int16_t current2 = 0;
+    sample.currentValid = controller.ReadCurrents(address, current1, current2);
+    if (sample.currentValid) sample.currentMa = channelM1 ? current1 : current2;
+
+    valid = false;
+    const uint32_t errors = controller.ReadError(address, &valid);
+    sample.errorValid = valid;
+    if (valid) sample.errorFlags = errors;
+
+    // A useful diagnostic sample requires the four channel measurements.
+    // Error validity is reported separately because older firmware may not
+    // support every status command consistently.
+    const bool requiredValid =
+        sample.encoderValid &&
+        sample.speedValid &&
+        sample.pwmValid &&
+        sample.currentValid;
+
+    if (requiredValid) {
+        snapshot = sample;
+    }
+
+    return requiredValid;
+}
+
+int8_t Motors::expectedEncoderDirection(
+    uint8_t axis,
+    float speedMps
+) const {
+    if (axis >= 4 || !isfinite(speedMps) || speedMps == 0.0f) {
+        return 0;
+    }
+
+    const int8_t commandSign = speedMps > 0.0f ? 1 : -1;
+    return static_cast<int8_t>(commandSign * motorDirection[axis]);
 }
