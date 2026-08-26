@@ -190,7 +190,7 @@ public:
         lastActuatorJamMask = jamMask;
         lastActuatorPcbFault = pcbFault;
 
-        StaticJsonDocument<384> doc;
+        StaticJsonDocument<768> doc;
 
         doc["type"] = "actuator_status";
         doc["commanded_mask"] = commandMask;
@@ -478,14 +478,74 @@ public:
 
     void depackage(void) {
         jsonPacket.clear();
-        DeserializationError err = deserializeJson(jsonPacket, receivedChars);
 
-        if (err) {
-            StaticJsonDocument<256> doc;
-            doc["error"] = "json_parse";
-            doc["code"]  = err.c_str();
-            doc["raw"]   = receivedChars;   // extremely useful
-            serializeJson(doc, *io);
+        const size_t inputLength = strnlen(
+            receivedChars,
+            numChars
+        );
+
+        DeserializationError error =
+            deserializeJson(
+                jsonPacket,
+                receivedChars
+            );
+
+        if (error) {
+            StaticJsonDocument<384> response;
+
+            response["type"] =
+                "serial_rx_error";
+
+            response["error"] =
+                "json_parse_failed";
+
+            response["code"] =
+                error.c_str();
+
+            response["input_length"] =
+                inputLength;
+
+            response["buffer_capacity"] =
+                numChars;
+
+            response["json_capacity"] =
+                jsonPacket.capacity();
+
+            response["ts_ms"] =
+                millis();
+
+            serializeJson(
+                response,
+                *io
+            );
+
+            io->println();
+            return;
+        }
+
+        if (jsonPacket.overflowed()) {
+            StaticJsonDocument<320> response;
+
+            response["type"] =
+                "serial_rx_error";
+
+            response["error"] =
+                "json_document_overflow";
+
+            response["input_length"] =
+                inputLength;
+
+            response["json_capacity"] =
+                jsonPacket.capacity();
+
+            response["ts_ms"] =
+                millis();
+
+            serializeJson(
+                response,
+                *io
+            );
+
             io->println();
             return;
         }
@@ -548,8 +608,53 @@ public:
             return; 
         }
 
-        if (!jsonPacket.containsKey("action")) return;
+        if (!jsonPacket.containsKey("action")) {
+            return;
+        }
+
         String action = jsonPacket["action"];
+
+        if (
+            action.equalsIgnoreCase("test_motor") ||
+            action.equalsIgnoreCase("test_actuator") ||
+            action.equalsIgnoreCase("calibrate_actuator") ||
+            action.equalsIgnoreCase("test_sensor") ||
+            action.equalsIgnoreCase("test_andon") ||
+            action.equalsIgnoreCase("abort_diagnostic")
+        ) {
+            StaticJsonDocument<384> received;
+
+            received["type"] =
+                "diagnostic_command_received";
+
+            received["action"] = action;
+
+            received["run_id"] =
+                jsonPacket["run_id"] | "";
+
+            received["transaction_id"] =
+                jsonPacket["transaction_id"] | "";
+
+            received["id"] =
+                jsonPacket["id"] | "";
+
+            received["channel"] =
+                jsonPacket["channel"] | -1;
+
+            received["diagnostic_active"] =
+                diagnosticRunner_ &&
+                diagnosticRunner_->active();
+
+            received["active_run_id"] =
+                diagnosticRunner_
+                    ? diagnosticRunner_->activeRunId()
+                    : "";
+
+            received["ts_ms"] = millis();
+
+            serializeJson(received, *io);
+            io->println();
+        }
 
         if (action.equalsIgnoreCase("set_hmi_connected")) {
             if (!hmiConnected_) {
@@ -573,26 +678,82 @@ public:
         }
 
         else if (action.equalsIgnoreCase("set_voltage")) {
-            int channel = jsonPacket["channel"] | -1;
-            float voltage = jsonPacket["voltage"] | 0.0f;
-            actuator->actuatorPositions[channel] = voltage;
-            actuator->writeDAC(channel, voltage);
+            const int channel = jsonPacket["channel"] | -1;
+            const float requestedVoltage = jsonPacket["voltage"] | NAN;
 
-            StaticJsonDocument<128> response;
-            response["status"]  = "OK";
+            StaticJsonDocument<224> response;
+            response["type"] = "actuator_command_status";
+            response["action"] = "set_voltage";
             response["channel"] = channel;
-            response["voltage"] = voltage;
-            serializeJson(response, *io); io->println();
+            response["ts_ms"] = millis();
+
+            if (!actuator) {
+                response["ok"] = false;
+                response["error"] = "actuator_not_attached";
+            } else if (channel < 0 || channel >= NUM_ACTUATORS) {
+                response["ok"] = false;
+                response["error"] = "invalid_actuator_channel";
+            } else if (!isfinite(requestedVoltage)) {
+                response["ok"] = false;
+                response["error"] = "invalid_actuator_voltage";
+            } else if (
+                diagnosticRunner_ &&
+                diagnosticRunner_->ownsActuatorOutputs()
+            ) {
+                response["ok"] = false;
+                response["error"] = "actuator_owned_by_diagnostic";
+            } else {
+                const float appliedVoltage = constrain(
+                    requestedVoltage,
+                    0.0f,
+                    CFG.actuator.maxCommandVoltage
+                );
+
+                actuator->actuatorPositions[channel] = appliedVoltage;
+                actuator->writeDAC(
+                    static_cast<uint8_t>(channel),
+                    appliedVoltage
+                );
+
+                response["ok"] = true;
+                response["status"] = "OK";
+                response["requested_voltage"] = requestedVoltage;
+                response["voltage"] = appliedVoltage;
+                response["clamped"] = appliedVoltage != requestedVoltage;
+            }
+
+            serializeJson(response, *io);
+            io->println();
         }
         else if (action.equalsIgnoreCase("read_feedback")) {
-            int channel = jsonPacket["channel"] | -1;
-            float feedback = actuator->readADC(channel);
-            actuator->feedbackSignals[channel] = feedback;
+            const int channel = jsonPacket["channel"] | -1;
 
-            StaticJsonDocument<128> response;
-            response["channel"]  = channel;
-            response["feedback"] = feedback;
-            serializeJson(response, *io); io->println();
+            StaticJsonDocument<192> response;
+            response["type"] = "actuator_feedback";
+            response["channel"] = channel;
+            response["ts_ms"] = millis();
+
+            if (!actuator) {
+                response["ok"] = false;
+                response["error"] = "actuator_not_attached";
+            } else if (channel < 0 || channel >= NUM_ACTUATORS) {
+                response["ok"] = false;
+                response["error"] = "invalid_actuator_channel";
+            } else {
+                const float feedback = actuator->readADC(
+                    static_cast<uint8_t>(channel)
+                );
+                actuator->feedbackSignals[channel] = feedback;
+
+                response["ok"] = isfinite(feedback);
+                response["feedback"] = feedback;
+                if (!isfinite(feedback)) {
+                    response["error"] = "invalid_actuator_feedback";
+                }
+            }
+
+            serializeJson(response, *io);
+            io->println();
         }
         else if (action.equalsIgnoreCase("get_actuator_status")) {
             emitActuatorStatus(true);
@@ -604,7 +765,7 @@ public:
             const uint32_t expectedSession = jsonPacket["expected_session_id"] |
                 (encoderSession_ ? encoderSession_->sessionId() : 0);
 
-            StaticJsonDocument<384> response;
+            StaticJsonDocument<768> response;
             response["type"] = isReset ? "encoder_reset" : "encoder_set";
             response["transaction_id"] = transactionId;
             response["source"] = source;
@@ -697,7 +858,7 @@ public:
             encoderSession_->transactionSucceeded(source, transactionId);
             const float confirmedMm = motors->getRobotRearDistanceMM();
 
-            StaticJsonDocument<384> triggerResult;
+            StaticJsonDocument<768> triggerResult;
             const bool triggersReconciled = reconcileTriggersToPosition_(
                 static_cast<int>(confirmedMm),
                 triggerResult
@@ -899,24 +1060,60 @@ public:
             }
 
             if (commit) {
-                StaticJsonDocument<384> response;
+                StaticJsonDocument<768> response;
+
                 const int currentPositionMm = motors
-                    ? static_cast<int>(motors->getRobotRearDistanceMM())
+                    ? static_cast<int>(
+                        motors->getRobotRearDistanceMM()
+                    )
                     : 0;
 
-                const bool reconciled = reconcileTriggersToPosition_(
-                    currentPositionMm,
-                    response
-                );
+                const bool reconciled =
+                    reconcileTriggersToPosition_(
+                        currentPositionMm,
+                        response
+                    );
 
-                // Resume evaluation only after a valid committed table has been
-                // reconciled. On failure, remain suspended to avoid partial behavior.
+                /*
+                * Resume trigger evaluation only after the complete validated table
+                * has been reconciled successfully.
+                *
+                * On failure, evaluation remains suspended so a partial or invalid
+                * table cannot affect actuator outputs.
+                */
                 if (reconciled) {
                     triggerEvaluationSuspended = false;
                 }
 
-                serializeJson(response, *io);
+                /*
+                * The commit acknowledgement is the authoritative result of this
+                * operation and must be transmitted before supplementary telemetry.
+                */
+                const size_t bytesWritten =
+                    serializeJson(
+                        response,
+                        *io
+                    );
+
                 io->println();
+
+                if (bytesWritten == 0) {
+                    io->println(
+                        "{\"status\":\"trigger_load_failed\","
+                        "\"ok\":false,"
+                        "\"error\":\"commit_ack_serialization_failed\"}"
+                    );
+
+                    triggerEvaluationSuspended = true;
+                    return;
+                }
+
+                /*
+                * Publish actuator telemetry only after the commit acknowledgement.
+                * The acknowledgement already contains the masks needed to verify
+                * the reconciliation result, so this message is supplementary.
+                */
+                emitActuatorStatus(true);
                 return;
             }
 
@@ -1072,9 +1269,45 @@ public:
             response["status"] = "shutdown_complete";
             serializeJson(response, *io); io->println();
         }
+        else if (action.equalsIgnoreCase("confirm_actuator_extension")) {
+            const char* runId = jsonPacket["run_id"] | "";
+            const char* transactionId = jsonPacket["transaction_id"] | "";
+            const char* moduleId = jsonPacket["id"] | "";
+
+            StaticJsonDocument<320> response;
+            response["type"] = "ack";
+            response["id"] = "confirm_actuator_extension";
+            response["run_id"] = runId;
+            response["transaction_id"] = transactionId;
+            response["module_id"] = moduleId;
+            response["ts_ms"] = millis();
+
+            if (!diagnosticRunner_) {
+                response["type"] = "error";
+                response["ok"] = false;
+                response["error"] = "diagnostic_runner_not_attached";
+                serializeJson(response, *io);
+                io->println();
+                return;
+            }
+
+            const bool accepted =
+                diagnosticRunner_->confirmActuatorExtension(jsonPacket);
+
+            response["type"] = accepted ? "ack" : "error";
+            response["ok"] = accepted;
+            response["accepted"] = accepted;
+            if (!accepted) {
+                response["error"] = "actuator_extension_confirmation_rejected";
+            }
+
+            serializeJson(response, *io);
+            io->println();
+        }
         else if (
             action.equalsIgnoreCase("test_motor") ||
             action.equalsIgnoreCase("test_actuator") ||
+            action.equalsIgnoreCase("calibrate_actuator") ||
             action.equalsIgnoreCase("test_sensor") ||
             action.equalsIgnoreCase("test_andon")
         ) {
@@ -1224,7 +1457,12 @@ public:
     }
     
     void checkTriggers() {
-        if (triggerEvaluationSuspended || !actuator || !motors) {
+        if (
+            triggerEvaluationSuspended ||
+            !actuator ||
+            !motors ||
+            (diagnosticRunner_ && diagnosticRunner_->ownsActuatorOutputs())
+        ) {
             return;
         }
 
@@ -1342,7 +1580,7 @@ public:
     }
 
     void emitEncoderStatus() {
-        StaticJsonDocument<384> doc;
+        StaticJsonDocument<768> doc;
         const float rearMm = motors->getRobotRearDistanceMM();
         doc["type"] = "encoder";
         doc["valid"] = encoderSession_ ? encoderSession_->valid() : false;
@@ -1409,7 +1647,7 @@ public:
 
     bool reconcileTriggersToPosition_(
         int currentPositionMm,
-        StaticJsonDocument<384>& result
+        StaticJsonDocument<768>& result
     ) {
         result.clear();
         result["status"] = "triggers_reconciled";
@@ -1423,11 +1661,54 @@ public:
             return false;
         }
 
-        // Rebuild a deterministic stable post-delay state. Start with every
-        // channel inactive, then replay only triggers already reached at the
-        // confirmed position. No historical delay is replayed.
-        for (uint8_t channel = 0; channel < NUM_ACTUATORS; ++channel) {
-            commandActuatorState_(channel, false);
+        /*
+        * Validate the complete trigger table before changing any actuator
+        * command. This prevents a malformed trigger later in the table from
+        * leaving partially reconstructed outputs.
+        */
+        for (const auto& trig : triggerBuffer) {
+            if (
+                trig.activate_channel < 0 ||
+                trig.activate_channel >= NUM_ACTUATORS ||
+                trig.deactivate_channel < 0 ||
+                trig.deactivate_channel >= NUM_ACTUATORS ||
+                trig.threshold < 0 ||
+                !isfinite(trig.delay_seconds) ||
+                trig.delay_seconds < 0.0f
+            ) {
+                result["ok"] = false;
+                result["error"] = "invalid_trigger_configuration";
+                result["threshold"] = trig.threshold;
+                result["activate_channel"] = trig.activate_channel;
+                result["deactivate_channel"] = trig.deactivate_channel;
+                return false;
+            }
+        }
+
+        /*
+        * Reconstruct the stable post-delay output state.
+        *
+        * Start with every channel inactive, then replay only triggers that
+        * have already been reached at the confirmed encoder position.
+        * Historical delays are not replayed.
+        */
+        for (
+            uint8_t channel = 0;
+            channel < NUM_ACTUATORS;
+            ++channel
+        ) {
+            commandActuatorState_(
+                channel,
+                false
+            );
+
+            if (actuator->hasPCBFault()) {
+                result["ok"] = false;
+                result["error"] =
+                    "actuator_pcb_fault_during_reconciliation";
+                result["failed_channel"] = channel;
+                return false;
+            }
         }
 
         size_t reachedCount = 0;
@@ -1443,29 +1724,41 @@ public:
                 continue;
             }
 
-            if (
-                trig.activate_channel < 0 ||
-                trig.activate_channel >= NUM_ACTUATORS ||
-                trig.deactivate_channel < 0 ||
-                trig.deactivate_channel >= NUM_ACTUATORS
-            ) {
+            commandActuatorState_(
+                static_cast<uint8_t>(
+                    trig.activate_channel
+                ),
+                true
+            );
+
+            if (actuator->hasPCBFault()) {
                 result["ok"] = false;
-                result["error"] = "invalid_trigger_channel";
-                result["threshold"] = trig.threshold;
-                result["activate_channel"] = trig.activate_channel;
-                result["deactivate_channel"] = trig.deactivate_channel;
+                result["error"] =
+                    "actuator_pcb_fault_during_reconciliation";
+                result["failed_channel"] =
+                    trig.activate_channel;
+                result["threshold"] =
+                    trig.threshold;
                 return false;
             }
 
-            // Reconstruct the stable state after this trigger's delay completed.
             commandActuatorState_(
-                static_cast<uint8_t>(trig.activate_channel),
-                true
-            );
-            commandActuatorState_(
-                static_cast<uint8_t>(trig.deactivate_channel),
+                static_cast<uint8_t>(
+                    trig.deactivate_channel
+                ),
                 false
             );
+
+            if (actuator->hasPCBFault()) {
+                result["ok"] = false;
+                result["error"] =
+                    "actuator_pcb_fault_during_reconciliation";
+                result["failed_channel"] =
+                    trig.deactivate_channel;
+                result["threshold"] =
+                    trig.threshold;
+                return false;
+            }
 
             trig.triggered = true;
             ++reachedCount;
@@ -1474,12 +1767,22 @@ public:
         result["ok"] = true;
         result["reached_count"] = reachedCount;
         result["pending_count"] = pendingCount;
-        result["commanded_mask"] = actuator->commandedActiveMask();
-        result["feedback_mask"] = actuator->feedbackActiveMask();
-        result["jam_mask"] = actuator->jamMask();
-        result["pcb_fault"] = actuator->hasPCBFault();
+        result["commanded_mask"] =
+            actuator->commandedActiveMask();
+        result["feedback_mask"] =
+            actuator->feedbackActiveMask();
+        result["jam_mask"] =
+            actuator->jamMask();
+        result["pcb_fault"] =
+            actuator->hasPCBFault();
 
-        emitActuatorStatus(true);
+        /*
+        * Do not emit actuator telemetry here.
+        *
+        * The caller must send the trigger commit acknowledgement first.
+        * This keeps operation acknowledgements ahead of supplementary
+        * telemetry on the UART.
+        */
         return true;
     }
 
