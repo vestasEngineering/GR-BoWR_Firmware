@@ -26,9 +26,12 @@ public:
         ActuatorRetracting,
         ActuatorRetractedHold,
         SensorSampling,
-        AndonBlueFirst,
-        AndonOff,
-        AndonBlueSecond,
+        ClampAwaitingOpenConfirmation,
+        ClampAwaitingClosedConfirmation,
+        AndonAwaitingGreenConfirmation,
+        AndonAwaitingYellowConfirmation,
+        AndonAwaitingBlueConfirmation,
+        AndonAwaitingRedConfirmation,
         Aborting
     };
 
@@ -44,6 +47,9 @@ public:
     const char* activeRunId() const { return runId_; }
     bool ownsActuatorOutputs() const;
     bool confirmActuatorExtension(const JsonDocument& command);
+    bool confirmClampState(const JsonDocument& command);
+    bool confirmAndonColor(const JsonDocument& command);
+
 
 private:
     static constexpr size_t kIdBytes = 48;
@@ -114,4 +120,22 @@ private:
     void emitRejected(const char* reason); void emitRejectedCommand(const JsonDocument& command,const char* reason);
     void emitTerminal(bool passed,const char* reason,JsonObjectConst measurements);
     void emitSimpleTerminal(bool passed,const char* reason);
+
+    static constexpr uint32_t kGuidedConfirmationTimeoutMs = 30000;
+    static constexpr uint8_t kAndonGreenBit = 1U << 0;
+    static constexpr uint8_t kAndonYellowBit = 1U << 1;
+    static constexpr uint8_t kAndonBlueBit = 1U << 2;
+    static constexpr uint8_t kAndonRedBit = 1U << 3;
+    uint32_t guidedConfirmationStartedAtMs_ = 0;
+    bool clampOpenReading_ = false;
+    bool clampClosedReading_ = false;
+    bool clampOpenRaw_ = false;
+    bool clampClosedRaw_ = false;
+    uint8_t andonConfirmedMask_ = 0;
+    uint8_t andonFailedMask_ = 0;
+    void emitClampProgress(const char* phase, bool expectedClamped);
+    void showAndonStep(State state, AndonLight::States color, const char* colorName,
+                    uint8_t step);
+    void finishClampDiagnostic();
+    void finishAndonDiagnostic();
 };

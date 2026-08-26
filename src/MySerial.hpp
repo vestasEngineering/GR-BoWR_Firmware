@@ -578,6 +578,7 @@ public:
             motors->speeds[3]
         };
 
+        String action = jsonPacket["action"];
         bool hasSpeedUpdate = false;
 
         for (int i = 0; i < 4; ++i) {
@@ -612,7 +613,38 @@ public:
             return;
         }
 
-        String action = jsonPacket["action"];
+        else if (action.equalsIgnoreCase("confirm_clamp_state")) {
+            StaticJsonDocument<320> response;
+            response["type"] = "ack";
+            response["id"] = "confirm_clamp_state";
+            response["run_id"] = jsonPacket["run_id"] | "";
+            response["transaction_id"] = jsonPacket["transaction_id"] | "";
+            response["module_id"] = jsonPacket["id"] | "";
+            response["ts_ms"] = millis();
+            const bool accepted = diagnosticRunner_ &&
+                diagnosticRunner_->confirmClampState(jsonPacket);
+            response["ok"] = accepted;
+            response["accepted"] = accepted;
+            if (!accepted) response["error"] = "clamp_confirmation_rejected";
+            serializeJson(response, *io); io->println();
+        }
+        else if (action.equalsIgnoreCase("confirm_andon_color")) {
+            StaticJsonDocument<320> response;
+            response["type"] = "ack";
+            response["id"] = "confirm_andon_color";
+            response["run_id"] = jsonPacket["run_id"] | "";
+            response["transaction_id"] = jsonPacket["transaction_id"] | "";
+            response["module_id"] = jsonPacket["id"] | "";
+            response["color"] = jsonPacket["color"] | "";
+            response["ts_ms"] = millis();
+            const bool accepted = diagnosticRunner_ &&
+                diagnosticRunner_->confirmAndonColor(jsonPacket);
+            response["ok"] = accepted;
+            response["accepted"] = accepted;
+            if (!accepted) response["error"] = "andon_confirmation_rejected";
+            serializeJson(response, *io); io->println();
+        }
+
 
         if (
             action.equalsIgnoreCase("test_motor") ||

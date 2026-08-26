@@ -745,16 +745,188 @@ bool DiagnosticRunner::ownsActuatorOutputs() const {
         state_ == State::ActuatorRetractedHold;
 }
 
-bool DiagnosticRunner::startSensor(const JsonDocument& c){const char*s=c["sensor"]|"";strlcpy(category_,s,sizeof(category_));if(!strcasecmp(s,"battery")||!strcasecmp(s,"ultrasonic")){state_=State::SensorSampling;return true;}emitRejected("unsupported_sensor_test");clearRun();return false;}
+bool DiagnosticRunner::startSensor(const JsonDocument& command) {
+    const char* sensor = command["sensor"] | "";
+    strlcpy(category_, sensor, sizeof(category_));
 
-bool DiagnosticRunner::startAndon(const JsonDocument&){strlcpy(category_,"andon",sizeof(category_));andon_.setOverride(AndonLight::BLUE);phaseStartedAtMs_=millis();state_=State::AndonBlueFirst;return true;}
+    if (!strcasecmp(sensor, "battery") || !strcasecmp(sensor, "ultrasonic")) {
+        state_ = State::SensorSampling;
+        return true;
+    }
+
+    if (!strcasecmp(sensor, "clamp")) {
+        clampOpenReading_ = false;
+        clampClosedReading_ = false;
+        clampOpenRaw_ = false;
+        clampClosedRaw_ = false;
+        guidedConfirmationStartedAtMs_ = millis();
+        state_ = State::ClampAwaitingOpenConfirmation;
+        emitClampProgress("awaiting_clamp_open_confirmation", false);
+        return true;
+    }
+
+    emitRejected("unsupported_sensor_test");
+    clearRun();
+    return false;
+}
+
+void DiagnosticRunner::emitClampProgress(const char* phase, bool expectedClamped) {
+    StaticJsonDocument<384> doc;
+    doc["type"] = "diagnostic_progress";
+    doc["category"] = "clamp";
+    doc["run_id"] = runId_;
+    doc["transaction_id"] = transactionId_;
+    doc["id"] = moduleId_;
+    doc["phase"] = phase;
+    doc["expected_clamped"] = expectedClamped;
+    doc["confirmation_timeout_ms"] = kGuidedConfirmationTimeoutMs;
+    doc["ts_ms"] = millis();
+    serializeJson(doc, io_);
+    io_.println();
+}
+
+bool DiagnosticRunner::confirmClampState(const JsonDocument& command) {
+    const char* run = command["run_id"] | "";
+    const char* transaction = command["transaction_id"] | "";
+    const char* module = command["id"] | "";
+    const bool expected = command["expected_clamped"] | false;
+
+    if (strcmp(run, runId_) || strcmp(transaction, transactionId_) ||
+        strcmp(module, moduleId_)) return false;
+
+    if (state_ == State::ClampAwaitingOpenConfirmation && !expected) {
+        clampOpenReading_ = clamp_.isClamped();
+        clampOpenRaw_ = clamp_.rawLevel();
+        guidedConfirmationStartedAtMs_ = millis();
+        state_ = State::ClampAwaitingClosedConfirmation;
+        emitClampProgress("awaiting_clamp_closed_confirmation", true);
+        return true;
+    }
+
+    if (state_ == State::ClampAwaitingClosedConfirmation && expected) {
+        clampClosedReading_ = clamp_.isClamped();
+        clampClosedRaw_ = clamp_.rawLevel();
+        finishClampDiagnostic();
+        return true;
+    }
+
+    return false;
+}
+
+void DiagnosticRunner::finishClampDiagnostic() {
+    const bool changed = clampOpenReading_ != clampClosedReading_;
+    const bool pass = !clampOpenReading_ && clampClosedReading_ && changed;
+    const char* reason = pass ? "clamp_sensor_passed" :
+        (clampOpenReading_ ? "clamp_indicates_closed_when_open" :
+         (!clampClosedReading_ ? "clamp_indicates_open_when_closed" :
+          "clamp_sensor_state_did_not_change"));
+
+    StaticJsonDocument<384> measurementsDoc;
+    JsonObject measurements = measurementsDoc.to<JsonObject>();
+    measurements["open_clamped"] = clampOpenReading_;
+    measurements["closed_clamped"] = clampClosedReading_;
+    measurements["open_raw_level"] = clampOpenRaw_;
+    measurements["closed_raw_level"] = clampClosedRaw_;
+    measurements["state_changed"] = changed;
+    measurements["debounce_ms"] = clamp_.debounceMs();
+    emitTerminal(pass, reason, measurements);
+    clearRun();
+}
+
+bool DiagnosticRunner::startAndon(const JsonDocument&) {
+    strlcpy(category_, "andon", sizeof(category_));
+    andonConfirmedMask_ = 0;
+    andonFailedMask_ = 0;
+    showAndonStep(State::AndonAwaitingGreenConfirmation,
+                  AndonLight::GREEN, "GREEN", 1);
+    return true;
+}
+
+void DiagnosticRunner::showAndonStep(State nextState, AndonLight::States color,
+                                     const char* colorName, uint8_t step) {
+    andon_.setOverride(color);
+    state_ = nextState;
+    guidedConfirmationStartedAtMs_ = millis();
+
+    StaticJsonDocument<384> doc;
+    doc["type"] = "diagnostic_progress";
+    doc["category"] = "andon";
+    doc["run_id"] = runId_;
+    doc["transaction_id"] = transactionId_;
+    doc["id"] = moduleId_;
+    doc["phase"] = "awaiting_andon_color_confirmation";
+    doc["color"] = colorName;
+    doc["step"] = step;
+    doc["total_steps"] = 4;
+    doc["confirmation_timeout_ms"] = kGuidedConfirmationTimeoutMs;
+    doc["ts_ms"] = millis();
+    serializeJson(doc, io_);
+    io_.println();
+}
+
+bool DiagnosticRunner::confirmAndonColor(const JsonDocument& command) {
+    const char* run = command["run_id"] | "";
+    const char* transaction = command["transaction_id"] | "";
+    const char* module = command["id"] | "";
+    const char* color = command["color"] | "";
+    const bool confirmed = command["confirmed"] | false;
+
+    if (strcmp(run, runId_) || strcmp(transaction, transactionId_) ||
+        strcmp(module, moduleId_)) return false;
+
+    uint8_t bit = 0;
+    State nextState = state_;
+    if (state_ == State::AndonAwaitingGreenConfirmation && !strcasecmp(color, "GREEN")) bit = kAndonGreenBit;
+    else if (state_ == State::AndonAwaitingYellowConfirmation && !strcasecmp(color, "YELLOW")) bit = kAndonYellowBit;
+    else if (state_ == State::AndonAwaitingBlueConfirmation && !strcasecmp(color, "BLUE")) bit = kAndonBlueBit;
+    else if (state_ == State::AndonAwaitingRedConfirmation && !strcasecmp(color, "RED")) bit = kAndonRedBit;
+    else return false;
+
+    if (confirmed) andonConfirmedMask_ |= bit;
+    else andonFailedMask_ |= bit;
+
+    if (bit == kAndonGreenBit) showAndonStep(State::AndonAwaitingYellowConfirmation, AndonLight::YELLOW, "YELLOW", 2);
+    else if (bit == kAndonYellowBit) showAndonStep(State::AndonAwaitingBlueConfirmation, AndonLight::BLUE, "BLUE", 3);
+    else if (bit == kAndonBlueBit) showAndonStep(State::AndonAwaitingRedConfirmation, AndonLight::RED, "RED", 4);
+    else finishAndonDiagnostic();
+    return true;
+}
+
+void DiagnosticRunner::finishAndonDiagnostic() {
+    andon_.clearOverride();
+    const bool pass = andonFailedMask_ == 0 &&
+        andonConfirmedMask_ == (kAndonGreenBit | kAndonYellowBit | kAndonBlueBit | kAndonRedBit);
+    StaticJsonDocument<384> mdoc;
+    JsonObject m = mdoc.to<JsonObject>();
+    m["green_confirmed"] = (andonConfirmedMask_ & kAndonGreenBit) != 0;
+    m["yellow_confirmed"] = (andonConfirmedMask_ & kAndonYellowBit) != 0;
+    m["blue_confirmed"] = (andonConfirmedMask_ & kAndonBlueBit) != 0;
+    m["red_confirmed"] = (andonConfirmedMask_ & kAndonRedBit) != 0;
+    m["confirmed_mask"] = andonConfirmedMask_;
+    m["failed_mask"] = andonFailedMask_;
+    m["colors_tested"] = 4;
+    emitTerminal(pass, pass ? "all_andon_colors_confirmed" :
+                            "one_or_more_andon_colors_failed", m);
+    clearRun();
+}
 
 void DiagnosticRunner::update() {
     if (!active()) {
         return;
     }
 
-    if (estop_.isActive() || motors_.isMotionInhibited()) {
+    const bool clampObservationState =
+        state_ == State::ClampAwaitingOpenConfirmation ||
+        state_ == State::ClampAwaitingClosedConfirmation;
+
+    if (estop_.isActive()) {
+        stopOwnedOutputs();
+        emitSimpleTerminal(false, "safety_inhibit_activated");
+        clearRun();
+        return;
+    }
+
+    if (motors_.isMotionInhibited() && !clampObservationState) {
         stopOwnedOutputs();
         emitSimpleTerminal(false, "safety_inhibit_activated");
         clearRun();
@@ -762,6 +934,23 @@ void DiagnosticRunner::update() {
     }
 
     const uint32_t now = millis();
+
+    const bool guidedWaiting =
+        clampObservationState ||
+        state_ == State::AndonAwaitingGreenConfirmation ||
+        state_ == State::AndonAwaitingYellowConfirmation ||
+        state_ == State::AndonAwaitingBlueConfirmation ||
+        state_ == State::AndonAwaitingRedConfirmation;
+
+    if (guidedWaiting &&
+        static_cast<uint32_t>(now - guidedConfirmationStartedAtMs_) >=
+            kGuidedConfirmationTimeoutMs) {
+        stopOwnedOutputs();
+        emitSimpleTerminal(false, "operator_confirmation_timeout");
+        clearRun();
+        return;
+    }
+
     switch (state_) {
         case State::MotorForwardRunning:
         case State::MotorForwardSettling:
@@ -782,10 +971,12 @@ void DiagnosticRunner::update() {
             updateSensor();
             break;
 
-        case State::AndonBlueFirst:
-        case State::AndonOff:
-        case State::AndonBlueSecond:
-            updateAndon(now);
+        case State::ClampAwaitingOpenConfirmation:
+        case State::ClampAwaitingClosedConfirmation:
+        case State::AndonAwaitingGreenConfirmation:
+        case State::AndonAwaitingYellowConfirmation:
+        case State::AndonAwaitingBlueConfirmation:
+        case State::AndonAwaitingRedConfirmation:
             break;
 
         case State::Aborting:
@@ -800,8 +991,6 @@ void DiagnosticRunner::update() {
 }
 
 void DiagnosticRunner::updateSensor(){StaticJsonDocument<224>m;bool p=false;const char*r="sensor_out_of_range";if(!strcasecmp(category_,"battery")){battery_.readBatteryVoltage();float v=battery_.voltage;m["voltage_V"]=v;p=v>=MIN_BATTERY_VOLTAGE&&v<=MAX_BATTERY_VOLTAGE;r=p?"voltage_in_range":"voltage_out_of_range";}else{int a=analogRead(CFG.ultrasonic.analog_pin);float d=(float)a*3.1f/1023.0f*CFG.ultrasonic.mm_per_volt+CFG.ultrasonic.offset_mm;m["adc"]=a;m["distance_mm"]=d;p=d>=CFG.ultrasonic.valid_min_mm&&d<=CFG.ultrasonic.valid_max_mm;r=p?"plausible_reading":"distance_out_of_range";}emitTerminal(p,r,m.as<JsonObjectConst>());clearRun();}
-
-void DiagnosticRunner::updateAndon(uint32_t n){constexpr uint32_t b=700,o=400;if(state_==State::AndonBlueFirst&&n-phaseStartedAtMs_>=b){andon_.setOverride(AndonLight::OFF);phaseStartedAtMs_=n;state_=State::AndonOff;}else if(state_==State::AndonOff&&n-phaseStartedAtMs_>=o){andon_.setOverride(AndonLight::BLUE);phaseStartedAtMs_=n;state_=State::AndonBlueSecond;}else if(state_==State::AndonBlueSecond&&n-phaseStartedAtMs_>=b){StaticJsonDocument<128>m;m["pattern"]="BLUE-OFF-BLUE";andon_.clearOverride();emitTerminal(true,"pattern_completed_visual_confirmation_required",m.as<JsonObjectConst>());clearRun();}}
 
 bool DiagnosticRunner::abort(const char*r){if(!active()||!r||strcmp(r,runId_))return false;state_=State::Aborting;return true;}
 
