@@ -16,6 +16,7 @@
 #include "Version.hpp"
 #include "EncoderSession.hpp"
 #include "DiagnosticRunner.hpp"
+#include "FeedforwardConfiguration.hpp"
 
 
 class AndonManager;
@@ -1158,6 +1159,184 @@ public:
             serializeJson(response, *io);
             io->println();
         }
+        else if (
+            action.equalsIgnoreCase(
+                "set_feedforward_configuration"
+            )
+        ) {
+            const char* transactionId =
+                jsonPacket[
+                    "transaction_id"
+                ] | "";
+
+            StaticJsonDocument<384>
+                response;
+
+            response["type"] =
+                "feedforward_configuration_ack";
+
+            response["transaction_id"] =
+                transactionId;
+
+            response["ts_ms"] =
+                millis();
+
+            if (
+                transactionId[0] == '\0'
+            ) {
+                response["ok"] = false;
+
+                response["error"] =
+                    "missing_transaction_id";
+            }
+            else if (
+                !ultrasonicEnabled_
+            ) {
+                response["ok"] = false;
+
+                response["error"] =
+                    "ultrasonic_process_not_attached";
+            }
+            else if (
+                *ultrasonicEnabled_
+            ) {
+                response["ok"] = false;
+
+                response["error"] =
+                    "process_active";
+            }
+            else if (
+                !jsonPacket["ff"]
+                    .is<JsonArray>()
+            ) {
+                response["ok"] = false;
+
+                response["error"] =
+                    "missing_ff_array";
+            }
+            else {
+                FeedforwardConfiguration::Values
+                    candidate;
+
+                const char*
+                    validationError = nullptr;
+
+                const bool valid =
+                    FeedforwardConfiguration
+                    ::parseAndValidate(
+                        jsonPacket["ff"]
+                            .as<JsonArrayConst>(),
+                        candidate,
+                        validationError
+                    );
+
+                if (!valid) {
+                    response["ok"] = false;
+
+                    response["error"] =
+                        validationError
+                            ? validationError
+                            : "invalid_ff_values";
+                }
+                else {
+                    FeedforwardConfiguration
+                        ::apply(
+                            candidate
+                        );
+
+                    if (ultrasonic_) {
+                        ultrasonic_->
+                            processSpeed = 0.0f;
+
+                        ultrasonic_->
+                            currentSpeed = 0.0f;
+
+                        ultrasonic_->
+                            glueState =
+                                Ultrasonic
+                                ::WAIT_FOR_GLUE;
+
+                        ultrasonic_->
+                            goodGlueCounter = 0;
+
+                        ultrasonic_->
+                            badReadStreak = 0;
+
+                        ultrasonic_->
+                            distanceFilterInitialized =
+                                false;
+                    }
+
+                    motors->BRAKE_STOP();
+
+                    response["ok"] = true;
+
+                    JsonArray appliedValues =
+                        response
+                        .createNestedArray(
+                            "ff"
+                        );
+
+                    FeedforwardConfiguration
+                        ::writeJson(
+                            appliedValues,
+                            candidate
+                        );
+                }
+            }
+
+            if (response.overflowed()) {
+                response.clear();
+
+                response["type"] =
+                    "feedforward_configuration_ack";
+
+                response["transaction_id"] =
+                    transactionId;
+
+                response["ok"] = false;
+
+                response["error"] =
+                    "acknowledgement_json_overflow";
+
+                response["ts_ms"] =
+                    millis();
+            }
+
+            const size_t bytesWritten =
+                serializeJson(
+                    response,
+                    *io
+                );
+
+            io->println();
+
+            if (bytesWritten == 0) {
+                StaticJsonDocument<192>
+                    fallback;
+
+                fallback["type"] =
+                    "feedforward_configuration_ack";
+
+                fallback["transaction_id"] =
+                    transactionId;
+
+                fallback["ok"] = false;
+
+                fallback["error"] =
+                    "acknowledgement_serialization_failed";
+
+                fallback["ts_ms"] =
+                    millis();
+
+                serializeJson(
+                    fallback,
+                    *io
+                );
+
+                io->println();
+            }
+        }
         else if (action.equalsIgnoreCase("set_motor_tuning")) {
             int32_t maxSpeed = jsonPacket["max_speed"] | 2500;
             int32_t accel    = jsonPacket["accel"] | 4250;
@@ -1192,33 +1371,178 @@ public:
             serializeJson(response, *io); 
             io->println();
         }
-        else if (action.equalsIgnoreCase("set_motor_direction")) {
-            int d0 = jsonPacket["directions"][0] | 1;
-            int d1 = jsonPacket["directions"][1] | -1;
-            int d2 = jsonPacket["directions"][2] | -1;
-            int d3 = jsonPacket["directions"][3] | 1;
+        else if (
+            action.equalsIgnoreCase(
+                "set_motor_direction"
+            )
+        ) {
+            const char* transactionId =
+                jsonPacket[
+                    "transaction_id"
+                ] | "";
 
-            motors->STOP();
+            StaticJsonDocument<256>
+                response;
+
+            response["type"] =
+                "motor_direction_ack";
+
+            response["transaction_id"] =
+                transactionId;
+
+            response["ts_ms"] =
+                millis();
+
+            if (
+                transactionId[0] == '\0'
+            ) {
+                response["ok"] = false;
+
+                response["error"] =
+                    "missing_transaction_id";
+
+                serializeJson(
+                    response,
+                    *io
+                );
+
+                io->println();
+
+                return;
+            }
+
+            if (
+                !jsonPacket["directions"]
+                    .is<JsonArray>()
+            ) {
+                response["ok"] = false;
+
+                response["error"] =
+                    "missing_directions_array";
+
+                serializeJson(
+                    response,
+                    *io
+                );
+
+                io->println();
+
+                return;
+            }
+
+            JsonArrayConst directions =
+                jsonPacket["directions"]
+                    .as<JsonArrayConst>();
+
+            if (directions.size() != 4) {
+                response["ok"] = false;
+
+                response["error"] =
+                    "invalid_direction_count";
+
+                serializeJson(
+                    response,
+                    *io
+                );
+
+                io->println();
+
+                return;
+            }
+
+            int requested[4];
+
+            for (
+                uint8_t index = 0;
+                index < 4;
+                ++index
+            ) {
+                const int value =
+                    directions[index]
+                        .as<int>();
+
+                if (
+                    value != 1
+                    && value != -1
+                ) {
+                    response["ok"] = false;
+
+                    response["error"] =
+                        "invalid_direction_value";
+
+                    response["invalid_index"] =
+                        index;
+
+                    serializeJson(
+                        response,
+                        *io
+                    );
+
+                    io->println();
+
+                    return;
+                }
+
+                requested[index] =
+                    value;
+            }
+
+            if (
+                ultrasonicEnabled_
+                && *ultrasonicEnabled_
+            ) {
+                response["ok"] = false;
+
+                response["error"] =
+                    "process_active";
+
+                serializeJson(
+                    response,
+                    *io
+                );
+
+                io->println();
+
+                return;
+            }
+
+            motors->BRAKE_STOP();
 
             motors->setMotorDirections(
-                d0 < 0 ? -1 : 1,
-                d1 < 0 ? -1 : 1,
-                d2 < 0 ? -1 : 1,
-                d3 < 0 ? -1 : 1
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3]
             );
 
-            StaticJsonDocument<160> response;
-            response["type"] = "ack";
             response["ok"] = true;
-            response["info"] = "motor_direction_set";
 
-            JsonArray arr = response.createNestedArray("directions");
-            arr.add(motors->motorDirection[0]);
-            arr.add(motors->motorDirection[1]);
-            arr.add(motors->motorDirection[2]);
-            arr.add(motors->motorDirection[3]);
+            JsonArray applied =
+                response.createNestedArray(
+                    "directions"
+                );
 
-            serializeJson(response, *io);
+            applied.add(
+                motors->motorDirection[0]
+            );
+
+            applied.add(
+                motors->motorDirection[1]
+            );
+
+            applied.add(
+                motors->motorDirection[2]
+            );
+
+            applied.add(
+                motors->motorDirection[3]
+            );
+
+            serializeJson(
+                response,
+                *io
+            );
+
             io->println();
         }
         else if (action.equalsIgnoreCase("get_firmware")) {
