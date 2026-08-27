@@ -1551,36 +1551,146 @@ public:
         else if (action.equalsIgnoreCase("get_firmware_features")) {
             emitFirmwareFeatures();
         }
-        else if (action.equalsIgnoreCase("start_process")) {
-            if (!ultrasonicEnabled_) {
+        else if (
+            action.equalsIgnoreCase(
+                "start_process"
+            )
+        ) {
+            const char* transactionId =
+                jsonPacket["transaction_id"] | "";
+
+            if (transactionId[0] == '\0') {
+                emitProcessStartAck(
+                    transactionId,
+                    false,
+                    "rejected",
+                    nullptr,
+                    "missing_transaction_id"
+                );
+
+                emitProcessStatus(
+                    false,
+                    "missing_transaction_id"
+                );
+
+                return;
+            }
+
+            if (
+                !ultrasonicEnabled_
+                || !ultrasonic_
+            ) {
+                emitProcessStartAck(
+                    transactionId,
+                    false,
+                    "rejected",
+                    nullptr,
+                    "ultrasonic_process_not_attached"
+                );
+
                 emitProcessStatus(
                     false,
                     "ultrasonic_process_not_attached"
                 );
+
                 return;
             }
 
-            if (actuator && actuator->hasPCBFault()) {
+            if (
+                diagnosticRunner_
+                && diagnosticRunner_->active()
+            ) {
+                emitProcessStartAck(
+                    transactionId,
+                    false,
+                    "blocked",
+                    nullptr,
+                    "diagnostic_active"
+                );
+
+                emitProcessStatus(
+                    false,
+                    "diagnostic_active"
+                );
+
+                return;
+            }
+
+            if (
+                actuator
+                && actuator->hasPCBFault()
+            ) {
                 *ultrasonicEnabled_ = false;
                 motors->BRAKE_STOP();
+
+                emitProcessStartAck(
+                    transactionId,
+                    false,
+                    "blocked",
+                    nullptr,
+                    "actuator_dac_adc_disconnected"
+                );
 
                 emitProcessStatus(
                     false,
                     "actuator_dac_adc_disconnected"
                 );
+
+                return;
+            }
+
+            if (
+                motors->isMotionInhibited()
+            ) {
+                *ultrasonicEnabled_ = false;
+                motors->BRAKE_STOP();
+
+                emitProcessStartAck(
+                    transactionId,
+                    false,
+                    "blocked",
+                    nullptr,
+                    "motion_inhibited"
+                );
+
+                emitProcessStatus(
+                    false,
+                    "motion_inhibited"
+                );
+
                 return;
             }
 
             *ultrasonicEnabled_ = true;
 
-            if (ultrasonic_) {
-                ultrasonic_->processSpeed = 0.0f;
-                ultrasonic_->currentSpeed = 0.0f;
-            }
+            ultrasonic_->processSpeed = 0.0f;
+            ultrasonic_->currentSpeed = 0.0f;
+
+            emitProcessStartAck(
+                transactionId,
+                true,
+                "running",
+                "operator_start",
+                nullptr
+            );
 
             emitProcessStatus(
                 true,
                 "operator_start"
+            );
+        }
+        else if (
+            action.equalsIgnoreCase(
+                "get_process_status"
+            )
+        ) {
+            const bool active =
+                ultrasonicEnabled_
+                && *ultrasonicEnabled_;
+
+            emitProcessStatus(
+                active,
+                "status_request"
             );
         }
         else if (
@@ -1988,6 +2098,40 @@ public:
         io->println();
     }
     
+    void emitProcessStartAck(
+        const char* transactionId,
+        bool accepted,
+        const char* state,
+        const char* reason = nullptr,
+        const char* error = nullptr
+    ) {
+        StaticJsonDocument<320> doc;
+
+        doc["type"] = "process_start_ack";
+        doc["transaction_id"] =
+            transactionId ? transactionId : "";
+        doc["ok"] = accepted;
+        doc["accepted"] = accepted;
+        doc["state"] =
+            state ? state : "unknown";
+        doc["motion_inhibited"] =
+            motors
+            ? motors->isMotionInhibited()
+            : true;
+        doc["ts_ms"] = millis();
+
+        if (reason && reason[0] != '\0') {
+            doc["reason"] = reason;
+        }
+
+        if (error && error[0] != '\0') {
+            doc["error"] = error;
+        }
+
+        serializeJson(doc, *io);
+        io->println();
+    }
+
     void commandActuatorState_(uint8_t channel, bool active) {
         if (!actuator || channel >= NUM_ACTUATORS) {
             return;
