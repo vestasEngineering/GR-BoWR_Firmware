@@ -12,6 +12,7 @@ class Ultrasonic;
 class UltrasonicServo;
 class EStop;
 class ClampSensor;
+class ContactorMonitor;
 
 class AndonManager {
 public:
@@ -24,12 +25,17 @@ public:
   static constexpr Config kDefaultCfg{100, 200, 3000};
 
   enum class FaultCode : uint8_t {
+    EStopActive,
+    ContactorPowerLost,
     BatteryCritical,
     UltrasonicPersistent,
     UltrasonicServoFault,
     ActuatorFault,
     ClampUnclamped,
-    Motor0Fault, Motor1Fault, Motor2Fault, Motor3Fault
+    Motor0Fault,
+    Motor1Fault,
+    Motor2Fault,
+    Motor3Fault
   };
 
   static const char* faultToKey(FaultCode f);
@@ -45,6 +51,7 @@ public:
                UltrasonicServo& ut_servo,
                EStop& estop,
                ClampSensor& clamp,
+               ContactorMonitor& contactor,
                bool& hmiConnected,
                Config cfg = kDefaultCfg);
 
@@ -59,6 +66,7 @@ public:
 private:
   AndonLight::States compute(uint32_t now);
   bool isEStop() const;
+  bool isContactorPowerLost() const;
   bool hasFault() const;
   bool isCommsLost() const;
   bool isHmiDisconnected() const;
@@ -87,6 +95,7 @@ private:
   Config             cfg_;
   EStop&             estop_;
   ClampSensor&       clamp_;
+  ContactorMonitor&  contactor_;
   bool&               hmi_connected_;
 
   uint32_t           last_tick_ms_{0};

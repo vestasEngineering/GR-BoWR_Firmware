@@ -60,7 +60,20 @@ BatteryMonitor batteryMonitor(myUART0);
 JogControl jogControl(motors, mySerial);
 
 #include "AndonManager.hpp"
-AndonManager andonMgr(andonLight, mySerial, motors, actuator, jogControl, batteryMonitor, ultrasonic, ultrasonicServo, estop, clamp, hmiConnected);
+AndonManager andonMgr(
+    andonLight,
+    mySerial,
+    motors,
+    actuator,
+    jogControl,
+    batteryMonitor,
+    ultrasonic,
+    ultrasonicServo,
+    estop,
+    clamp,
+    contactor,
+    hmiConnected
+);
 
 #include "DiagnosticRunner.hpp"
 DiagnosticRunner diagnosticRunner(myUART0, motors, actuator, batteryMonitor, ultrasonic, ultrasonicServo, andonMgr, estop, clamp, jogControl, ultrasonicEnabled
@@ -293,6 +306,7 @@ void loop() {
 
     andonLight.loop();
     estop.tick();
+    contactor.tick();
     encoderSession.tick(ultrasonicEnabled);
     clamp.tick();
     batteryMonitor.stateMachine();
