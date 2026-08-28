@@ -46,6 +46,16 @@ public:
     bool* hmiConnected_ = nullptr;
     bool triggerEvaluationSuspended = false;
 
+    float transitionActuatorVoltage_ = CFG.actuator.transitionActiveVoltage;
+
+    struct ActuatorPreviewLease {
+        bool active = false;
+        uint8_t channel = 0;
+        uint32_t expiresAtMs = 0;
+        uint32_t lastSequence = 0;
+        char sessionId[64] = {0};
+    };
+    ActuatorPreviewLease actuatorPreview_;
 
     unsigned long lastEncoderEmitMs = 0;
     static constexpr unsigned long encoderEmitPeriodMs = 500;
@@ -67,11 +77,14 @@ public:
         int activate_channel;
         int deactivate_channel;
         float delay_seconds;
+        bool hold_active = false;
         bool triggered = false;
         unsigned long triggerTime = 0;
         bool waitingToDeactivate = false;
     };
     std::vector<Trigger> triggerBuffer;
+    std::vector<Trigger> pendingTriggerBuffer;
+    bool triggerLoadInProgress = false;
     
     struct DirectionTestState {
         bool active = false;
@@ -338,7 +351,8 @@ public:
 
     void stateMachine(void) {
         receiveLinux(); // refresh timeout if traffic arrives
-        updateDirectionTest();  
+        updateDirectionTest();
+        updateActuatorPreviewLease();  
         checkTriggers(); // encoder-driven triggers
 
         unsigned long now = millis();
@@ -367,8 +381,13 @@ public:
         case LinkState::CONNECTED:
             // If no traffic for too long, consider disconnected
             if (!thisDelay && !timeout) {
-                thisDelay = 500;     // 500 ms heartbeat
+                thisDelay = 500;
                 state = LinkState::DISCONNECTED;
+
+                if (actuatorPreview_.active) {
+                    stopActuatorPreview("transport_lost");
+                }
+
                 motors->STOP();
             }
             if (!thisDelay) {
@@ -801,6 +820,91 @@ public:
             io->println();
         }
 
+        else if (action.equalsIgnoreCase("set_transition_actuator_voltage")) {
+            const char* transactionId = jsonPacket["transaction_id"] | "";
+            const float voltage = jsonPacket["voltage"] | NAN;
+            StaticJsonDocument<256> response;
+            response["type"] = "transition_actuator_voltage_ack";
+            response["transaction_id"] = transactionId;
+            response["ts_ms"] = millis();
+            if (transactionId[0] == '\0') {
+                response["ok"] = false;
+                response["error"] =
+                    "missing_transaction_id";
+            } else if (
+                !isfinite(voltage) ||
+                voltage < 0.0f ||
+                voltage > CFG.actuator.maxCommandVoltage
+            ) {
+                response["ok"] = false;
+                response["error"] =
+                    "invalid_actuator_voltage";
+            } else if (actuatorPreview_.active) {
+                response["ok"] = false;
+                response["error"] =
+                    "actuator_preview_active";
+            } else if (
+                ultrasonicEnabled_ &&
+                *ultrasonicEnabled_
+            ) {
+                response["ok"] = false;
+                response["error"] =
+                    "process_active";
+            } else {
+                transitionActuatorVoltage_ = voltage;
+
+                response["ok"] = true;
+                response["voltage"] =
+                    transitionActuatorVoltage_;
+            }
+            serializeJson(response, *io); io->println();
+        }
+        else if (action.equalsIgnoreCase("preview_actuator_voltage")) {
+            handleActuatorPreview_();
+        }
+        else if (action.equalsIgnoreCase("stop_actuator_preview")) {
+            const char* sessionId =
+                jsonPacket["preview_session_id"] | "";
+
+            if (
+                actuatorPreview_.active &&
+                sessionId[0] != '\0' &&
+                strcmp(
+                    sessionId,
+                    actuatorPreview_.sessionId
+                ) == 0
+            ) {
+                stopActuatorPreview("operator_stop");
+            } else {
+                StaticJsonDocument<224> response;
+
+                response["type"] =
+                    "actuator_preview_status";
+
+                response["preview_session_id"] =
+                    sessionId;
+
+                response["active"] =
+                    actuatorPreview_.active;
+
+                response["ok"] = false;
+                response["ts_ms"] = millis();
+
+                if (sessionId[0] == '\0') {
+                    response["error"] =
+                        "missing_preview_session_id";
+                } else if (!actuatorPreview_.active) {
+                    response["error"] =
+                        "preview_not_active";
+                } else {
+                    response["error"] =
+                        "preview_session_mismatch";
+                }
+
+                serializeJson(response, *io);
+                io->println();
+            }
+        }
         else if (action.equalsIgnoreCase("set_voltage")) {
             const int channel = jsonPacket["channel"] | -1;
             const float requestedVoltage = jsonPacket["voltage"] | NAN;
@@ -813,19 +917,40 @@ public:
 
             if (!actuator) {
                 response["ok"] = false;
-                response["error"] = "actuator_not_attached";
-            } else if (channel < 0 || channel >= NUM_ACTUATORS) {
+                response["error"] =
+                    "actuator_not_attached";
+            } else if (
+                channel < 0 ||
+                channel >= NUM_ACTUATORS
+            ) {
                 response["ok"] = false;
-                response["error"] = "invalid_actuator_channel";
-            } else if (!isfinite(requestedVoltage)) {
-                response["ok"] = false;
-                response["error"] = "invalid_actuator_voltage";
+                response["error"] =
+                    "invalid_actuator_channel";
             } else if (
                 diagnosticRunner_ &&
                 diagnosticRunner_->ownsActuatorOutputs()
             ) {
                 response["ok"] = false;
-                response["error"] = "actuator_owned_by_diagnostic";
+                response["error"] =
+                    "actuator_owned_by_diagnostic";
+            } else if (
+                actuatorPreview_.active &&
+                channel == actuatorPreview_.channel
+            ) {
+                response["ok"] = false;
+                response["error"] =
+                    "actuator_owned_by_preview";
+            } else if (
+                ultrasonicEnabled_ &&
+                *ultrasonicEnabled_
+            ) {
+                response["ok"] = false;
+                response["error"] =
+                    "process_active";
+            } else if (!isfinite(requestedVoltage)) {
+                response["ok"] = false;
+                response["error"] =
+                    "invalid_actuator_voltage";
             } else {
                 const float appliedVoltage = constrain(
                     requestedVoltage,
@@ -833,7 +958,9 @@ public:
                     CFG.actuator.maxCommandVoltage
                 );
 
-                actuator->actuatorPositions[channel] = appliedVoltage;
+                actuator->actuatorPositions[channel] =
+                    appliedVoltage;
+
                 actuator->writeDAC(
                     static_cast<uint8_t>(channel),
                     appliedVoltage
@@ -841,9 +968,15 @@ public:
 
                 response["ok"] = true;
                 response["status"] = "OK";
-                response["requested_voltage"] = requestedVoltage;
-                response["voltage"] = appliedVoltage;
-                response["clamped"] = appliedVoltage != requestedVoltage;
+
+                response["requested_voltage"] =
+                    requestedVoltage;
+
+                response["voltage"] =
+                    appliedVoltage;
+
+                response["clamped"] =
+                    appliedVoltage != requestedVoltage;
             }
 
             serializeJson(response, *io);
@@ -960,7 +1093,7 @@ public:
 
                 JsonArray observedCounts =
                     response.createNestedArray(
-                        "observed*counts"
+                        "observed_counts"
                     );
 
                 for (
@@ -1028,6 +1161,10 @@ public:
             emitEncoderStatus();
         }
         else if (action.equalsIgnoreCase("STOP")) {
+            if (actuatorPreview_.active) {
+                stopActuatorPreview("operator_stop");
+            }
+
             motors->STOP();
         }
         else if (action.equalsIgnoreCase("set_light")) {
@@ -1079,19 +1216,33 @@ public:
             const bool shouldClear = jsonPacket["clear"] | false;
             const bool begin = jsonPacket["begin"] | false;
             const bool commit = jsonPacket["commit"] | false;
+            std::vector<Trigger> parsedTriggers;
 
             if (begin) {
                 triggerEvaluationSuspended = true;
             }
 
-            if (shouldClear) {
-                triggerBuffer.clear();
-            }
-
             bool valid = true;
             const char* validationError = nullptr;
 
-            if (jsonPacket.containsKey("trigger")) {
+            const bool hasSingleTrigger =
+                jsonPacket.containsKey("trigger");
+
+            const bool hasTriggerArray =
+                jsonPacket.containsKey("triggers");
+
+            if (
+                !hasSingleTrigger &&
+                !hasTriggerArray &&
+                !shouldClear &&
+                !commit
+            ) {
+                valid = false;
+                validationError =
+                    "missing_trigger_payload";
+            }
+
+            if (valid && hasSingleTrigger) {
                 JsonObject t = jsonPacket["trigger"].as<JsonObject>();
 
                 if (
@@ -1105,6 +1256,7 @@ public:
                     trig.activate_channel = t["activate"];
                     trig.deactivate_channel = t["deactivate"];
                     trig.delay_seconds = t["delay"];
+                    trig.hold_active = t["hold_active"] | false;
                     trig.triggered = false;
                     trig.triggerTime = 0;
                     trig.waitingToDeactivate = false;
@@ -1121,7 +1273,7 @@ public:
                         valid = false;
                         validationError = "invalid_trigger_values";
                     } else {
-                        triggerBuffer.push_back(trig);
+                        parsedTriggers.push_back(trig);
                     }
                 } else {
                     valid = false;
@@ -1129,7 +1281,7 @@ public:
                 }
             }
 
-            if (jsonPacket.containsKey("triggers")) {
+            if (valid && hasTriggerArray) {
                 JsonArray arr = jsonPacket["triggers"].as<JsonArray>();
 
                 for (JsonObject t : arr) {
@@ -1149,6 +1301,7 @@ public:
                     trig.activate_channel = t["activate"];
                     trig.deactivate_channel = t["deactivate"];
                     trig.delay_seconds = t["delay"];
+                    trig.hold_active = t["hold_active"] | false;
                     trig.triggered = false;
                     trig.triggerTime = 0;
                     trig.waitingToDeactivate = false;
@@ -1166,8 +1319,7 @@ public:
                         validationError = "invalid_trigger_values";
                         break;
                     }
-
-                    triggerBuffer.push_back(trig);
+                    parsedTriggers.push_back(trig);
                 }
             }
 
@@ -1177,11 +1329,22 @@ public:
                 response["ok"] = false;
                 response["error"] = validationError;
                 response["count"] = triggerBuffer.size();
+                response["received_count"] = parsedTriggers.size();
                 response["ts_ms"] = millis();
                 serializeJson(response, *io);
                 io->println();
                 return;
             }
+
+            if (shouldClear) {
+                triggerBuffer.clear();
+            }
+
+            triggerBuffer.insert(
+                triggerBuffer.end(),
+                parsedTriggers.begin(),
+                parsedTriggers.end()
+            );
 
             if (commit) {
                 StaticJsonDocument<768> response;
@@ -1752,6 +1915,10 @@ public:
                 return;
             }
 
+            if (actuatorPreview_.active) {
+                stopActuatorPreview("process_start");
+            }
+
             *ultrasonicEnabled_ = true;
 
             ultrasonic_->processSpeed = 0.0f;
@@ -1817,14 +1984,32 @@ public:
             serializeJson(response, *io); io->println();
         }
         else if (action.equalsIgnoreCase("shutdown")) {
+            if (actuatorPreview_.active) {
+                stopActuatorPreview("shutdown");
+            }
+
             motors->STOP();
-            if (ultrasonicEnabled_) *ultrasonicEnabled_ = false;
+
+            if (ultrasonicEnabled_) {
+                *ultrasonicEnabled_ = false;
+            }
+
+            triggerEvaluationSuspended = true;
             triggerBuffer.clear();
             serialStarted = false;
 
-            StaticJsonDocument<64> response;
-            response["status"] = "shutdown_complete";
-            serializeJson(response, *io); io->println();
+            StaticJsonDocument<96> response;
+
+            response["status"] =
+                "shutdown_complete";
+
+            response["actuator_preview_active"] =
+                false;
+
+            response["ts_ms"] = millis();
+
+            serializeJson(response, *io);
+            io->println();
         }
         else if (action.equalsIgnoreCase("confirm_actuator_extension")) {
             const char* runId = jsonPacket["run_id"] | "";
@@ -1888,6 +2073,12 @@ public:
                 serializeJson(response, *io);
                 io->println();
                 return;
+            }
+
+            if (actuatorPreview_.active) {
+                stopActuatorPreview(
+                    "diagnostic_start"
+                );
             }
 
             diagnosticRunner_->start(
@@ -2126,6 +2317,7 @@ public:
     void checkTriggers() {
         if (
             triggerEvaluationSuspended ||
+            actuatorPreview_.active ||
             !actuator ||
             !motors ||
             (diagnosticRunner_ && diagnosticRunner_->ownsActuatorOutputs())
@@ -2155,9 +2347,7 @@ public:
                 }
 
                 const float activeVoltage = constrain(
-                    4.4f,
-                    0.0f,
-                    CFG.actuator.maxCommandVoltage
+                    transitionActuatorVoltage_, 0.0f, CFG.actuator.maxCommandVoltage
                 );
 
                 actuator->actuatorPositions[activateChannel] = activeVoltage;
@@ -2167,7 +2357,7 @@ public:
                 );
 
                 trig.triggerTime = now;
-                trig.waitingToDeactivate = true;
+                trig.waitingToDeactivate = !trig.hold_active;
                 trig.triggered = true;
                 emitActuatorStatus(true);
 
@@ -2460,7 +2650,11 @@ public:
         }
 
         const float voltage = active
-            ? constrain(4.4f, 0.0f, CFG.actuator.maxCommandVoltage)
+            ? constrain(
+                transitionActuatorVoltage_,
+                0.0f,
+                CFG.actuator.maxCommandVoltage
+            )
             : 0.0f;
 
         actuator->actuatorPositions[channel] = voltage;
@@ -2483,10 +2677,28 @@ public:
             return false;
         }
 
+        if (diagnosticRunner_ && diagnosticRunner_->ownsActuatorOutputs()) {
+            result["ok"] = false;
+            result["error"] = "actuator_owned_by_diagnostic";
+            return false;
+        }
+
+        if (actuatorPreview_.active) {
+            result["ok"] = false;
+            result["error"] = "actuator_owned_by_preview";
+            return false;
+        }
+
+        if (actuator->hasPCBFault()) {
+            result["ok"] = false;
+            result["error"] = "actuator_pcb_fault_before_reconciliation";
+            return false;
+        }
+
         /*
-        * Validate the complete trigger table before changing any actuator
-        * command. This prevents a malformed trigger later in the table from
-        * leaving partially reconstructed outputs.
+        * Validate the complete trigger table before modifying any output.
+        * This prevents a malformed entry later in the table from causing a
+        * partially reconstructed actuator state.
         */
         for (const auto& trig : triggerBuffer) {
             if (
@@ -2508,26 +2720,17 @@ public:
         }
 
         /*
-        * Reconstruct the stable post-delay output state.
-        *
-        * Start with every channel inactive, then replay only triggers that
-        * have already been reached at the confirmed encoder position.
-        * Historical delays are not replayed.
+        * Start from an explicitly safe inactive state. Reconciliation then
+        * replays the stable result of every trigger already reached at the
+        * confirmed encoder position.
         */
-        for (
-            uint8_t channel = 0;
-            channel < NUM_ACTUATORS;
-            ++channel
-        ) {
-            commandActuatorState_(
-                channel,
-                false
-            );
+        for (uint8_t channel = 0; channel < NUM_ACTUATORS; ++channel) {
+            commandActuatorState_(channel, false);
 
             if (actuator->hasPCBFault()) {
                 result["ok"] = false;
                 result["error"] =
-                    "actuator_pcb_fault_during_reconciliation";
+                    "actuator_pcb_fault_during_reconciliation_reset";
                 result["failed_channel"] = channel;
                 return false;
             }
@@ -2547,39 +2750,51 @@ public:
             }
 
             commandActuatorState_(
-                static_cast<uint8_t>(
-                    trig.activate_channel
-                ),
+                static_cast<uint8_t>(trig.activate_channel),
                 true
             );
 
             if (actuator->hasPCBFault()) {
+                for (uint8_t channel = 0; channel < NUM_ACTUATORS; ++channel) {
+                    commandActuatorState_(channel, false);
+                }
+
                 result["ok"] = false;
                 result["error"] =
                     "actuator_pcb_fault_during_reconciliation";
-                result["failed_channel"] =
-                    trig.activate_channel;
-                result["threshold"] =
-                    trig.threshold;
+                result["failed_channel"] = trig.activate_channel;
+                result["threshold"] = trig.threshold;
                 return false;
             }
 
-            commandActuatorState_(
-                static_cast<uint8_t>(
-                    trig.deactivate_channel
-                ),
-                false
-            );
+            /*
+            * Historical delay intervals are not replayed. A reached non-hold
+            * trigger is reconstructed directly into its stable post-delay
+            * state. A hold trigger leaves its activation output active.
+            */
+            if (!trig.hold_active) {
+                commandActuatorState_(
+                    static_cast<uint8_t>(trig.deactivate_channel),
+                    false
+                );
 
-            if (actuator->hasPCBFault()) {
-                result["ok"] = false;
-                result["error"] =
-                    "actuator_pcb_fault_during_reconciliation";
-                result["failed_channel"] =
-                    trig.deactivate_channel;
-                result["threshold"] =
-                    trig.threshold;
-                return false;
+                if (actuator->hasPCBFault()) {
+                    for (
+                        uint8_t channel = 0;
+                        channel < NUM_ACTUATORS;
+                        ++channel
+                    ) {
+                        commandActuatorState_(channel, false);
+                    }
+
+                    result["ok"] = false;
+                    result["error"] =
+                        "actuator_pcb_fault_during_reconciliation";
+                    result["failed_channel"] =
+                        trig.deactivate_channel;
+                    result["threshold"] = trig.threshold;
+                    return false;
+                }
             }
 
             trig.triggered = true;
@@ -2598,13 +2813,6 @@ public:
         result["pcb_fault"] =
             actuator->hasPCBFault();
 
-        /*
-        * Do not emit actuator telemetry here.
-        *
-        * The caller must send the trigger commit acknowledgement first.
-        * This keeps operation acknowledgements ahead of supplementary
-        * telemetry on the UART.
-        */
         return true;
     }
 
@@ -2773,6 +2981,142 @@ void runTestUltrasonicServo(const char* id) {
         pass ? "distance_ok" : "distance_too_close");
 }
 
+    void stopActuatorPreview(const char* reason) {
+        if (!actuatorPreview_.active) {
+            return;
+        }
+
+        const uint8_t channel =
+            actuatorPreview_.channel;
+
+        char sessionId[
+            sizeof(actuatorPreview_.sessionId)
+        ];
+
+        strlcpy(
+            sessionId,
+            actuatorPreview_.sessionId,
+            sizeof(sessionId)
+        );
+
+        actuatorPreview_.active = false;
+        actuatorPreview_.expiresAtMs = 0;
+        actuatorPreview_.lastSequence = 0;
+        actuatorPreview_.sessionId[0] = '\0';
+
+        commandActuatorState_(channel, false);
+
+        StaticJsonDocument<224> response;
+
+        response["type"] =
+            "actuator_preview_status";
+
+        response["preview_session_id"] =
+            sessionId;
+
+        response["ok"] = true;
+        response["active"] = false;
+        response["channel"] = channel;
+
+        response["reason"] =
+            reason ? reason : "stopped";
+
+        response["ts_ms"] = millis();
+
+        serializeJson(response, *io);
+        io->println();
+    }
+
+    void updateActuatorPreviewLease() {
+        if (!actuatorPreview_.active) {
+            return;
+        }
+
+        if (!actuator) {
+            stopActuatorPreview("actuator_not_attached");
+            return;
+        }
+
+        if (actuator->hasPCBFault()) {
+            stopActuatorPreview("actuator_pcb_fault");
+            return;
+        }
+
+        if (
+            diagnosticRunner_ &&
+            diagnosticRunner_->ownsActuatorOutputs()
+        ) {
+            stopActuatorPreview("actuator_owned_by_diagnostic");
+            return;
+        }
+
+        if (
+            ultrasonicEnabled_ &&
+            *ultrasonicEnabled_
+        ) {
+            stopActuatorPreview("process_started");
+            return;
+        }
+
+        if (
+            static_cast<int32_t>(
+                millis() - actuatorPreview_.expiresAtMs
+            ) >= 0
+        ) {
+            stopActuatorPreview("lease_expired");
+        }
+    }
+
+    void handleActuatorPreview_() {
+        const char* sessionId = jsonPacket["preview_session_id"] | "";
+        const int channel = jsonPacket["channel"] | -1;
+        const float voltage = jsonPacket["voltage"] | NAN;
+        uint32_t leaseMs = jsonPacket["lease_ms"] | 500;
+        const uint32_t sequence = jsonPacket["seq"] | 0;
+
+        StaticJsonDocument<256> response;
+        response["type"] = "actuator_preview_status";
+        response["preview_session_id"] = sessionId;
+        response["channel"] = channel;
+        response["seq"] = sequence;
+        response["ts_ms"] = millis();
+
+        if (!actuator || actuator->hasPCBFault()) {
+            response["ok"] = false; response["error"] = "actuator_pcb_fault";
+        } else if (channel != 0) {
+            response["ok"] = false; response["error"] = "preview_channel_must_be_zero";
+        } else if (sessionId[0] == '\0' || strlen(sessionId) >= sizeof(actuatorPreview_.sessionId)) {
+            response["ok"] = false; response["error"] = "invalid_preview_session_id";
+        } else if (sequence == 0) {
+            response["ok"] = false;
+            response["error"] =
+                "invalid_preview_sequence";        
+        } else if (!isfinite(voltage) || voltage < 0.0f || voltage > CFG.actuator.maxCommandVoltage) {
+            response["ok"] = false; response["error"] = "invalid_preview_voltage";
+        } else if (diagnosticRunner_ && diagnosticRunner_->ownsActuatorOutputs()) {
+            response["ok"] = false; response["error"] = "actuator_owned_by_diagnostic";
+        } else if (ultrasonicEnabled_ && *ultrasonicEnabled_) {
+            response["ok"] = false; response["error"] = "process_active";
+        } else if (actuatorPreview_.active && strcmp(sessionId, actuatorPreview_.sessionId) != 0) {
+            response["ok"] = false; response["error"] = "preview_owned_by_another_session";
+        } else if (actuatorPreview_.active && sequence <= actuatorPreview_.lastSequence) {
+            response["ok"] = false; response["error"] = "stale_preview_sequence";
+        } else {
+            leaseMs = constrain(leaseMs, 100UL, 1000UL);
+            actuatorPreview_.active = true;
+            actuatorPreview_.channel = 0;
+            actuatorPreview_.expiresAtMs = millis() + leaseMs;
+            actuatorPreview_.lastSequence = sequence;
+            strlcpy(actuatorPreview_.sessionId, sessionId, sizeof(actuatorPreview_.sessionId));
+            actuator->actuatorPositions[0] = voltage;
+            actuator->writeDAC(0, voltage);
+            response["ok"] = true;
+            response["active"] = true;
+            response["voltage"] = voltage;
+            response["lease_ms"] = leaseMs;
+        }
+        serializeJson(response, *io); io->println();
+    }
 
 private:
     Ultrasonic* ultrasonic_        = nullptr;

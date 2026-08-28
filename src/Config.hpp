@@ -6,17 +6,21 @@
 // -------------------------
 
 struct ActuatorCfg {
-    float maxCommandVoltage      = 5.0f;
-    float maxFeedbackVoltage     = 5.0f;
+    float maxCommandVoltage       = 5.0f;
+    float maxFeedbackVoltage      = 5.0f;
 
-    uint16_t settle_ms           = 15000;
-    float    activate_cmd_min_v  = 4.0f;
-    float    deactivate_cmd_max_v= 0.5f;
-    float    active_fb_max_v     = 1.00f;
-    float    inactive_fb_min_v   = 2.20f;
+    // Factory actuator stroke command used by blade transitions.
+    // Runtime configuration may override this value after startup.
+    float transitionActiveVoltage = 4.4f;
 
-    float    fb_map_m            = -0.529920101f;
-    float    fb_map_b            =  2.705734968f;
+    uint16_t settle_ms            = 15000;
+    float activate_cmd_min_v      = 4.0f;
+    float deactivate_cmd_max_v    = 0.5f;
+    float active_fb_max_v         = 1.00f;
+    float inactive_fb_min_v       = 2.20f;
+
+    float fb_map_m                = -0.529920101f;
+    float fb_map_b                =  2.705734968f;
 };
 
 struct AndonCfg {
