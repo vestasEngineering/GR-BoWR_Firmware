@@ -1,8 +1,6 @@
 #include "Motors.hpp"
 #include <math.h>
 
-const int8_t Motors::AXIS_SIGN[4] = { 1, -1, 1, -1 };
-
 // ---------- Constructors ----------
 Motors::Motors()
     : rcA(&roboclaw_uart_a, 10000),
@@ -12,6 +10,30 @@ Motors::Motors(UART* ua, UART* ub)
     : rcA(ua, 10000),
       rcB(ub, 10000) {}
 
+
+void Motors::setMotorDirection(uint8_t axis, int8_t direction) {
+    if (axis >= 4) return;
+    motorDirection[axis] = direction < 0 ? -1 : 1;
+}
+
+void Motors::setMotorDirections(int8_t d0, int8_t d1, int8_t d2, int8_t d3) {
+    setMotorDirection(0, d0);
+    setMotorDirection(1, d1);
+    setMotorDirection(2, d2);
+    setMotorDirection(3, d3);
+}
+
+void Motors::setEncoderDirection(uint8_t axis, int8_t direction) {
+    if (axis >= 4) return;
+    encoderDirection[axis] = direction < 0 ? -1 : 1;
+}
+
+void Motors::setEncoderDirections(int8_t d0, int8_t d1, int8_t d2, int8_t d3) {
+    setEncoderDirection(0, d0);
+    setEncoderDirection(1, d1);
+    setEncoderDirection(2, d2);
+    setEncoderDirection(3, d3);
+}
 
 // ---------- Internal helpers ----------
 uint32_t Motors::u32bits(int32_t v) {
@@ -446,10 +468,10 @@ bool Motors::setRobotRearDistanceMMVerified(
         mm_to_distance_counts(mm);
 
     const int32_t expectedRaw[4] = {
-        normalizedTarget * AXIS_SIGN[0],
-        normalizedTarget * AXIS_SIGN[1],
-        normalizedTarget * AXIS_SIGN[2],
-        normalizedTarget * AXIS_SIGN[3],
+        normalizedTarget * encoderDirection[0],
+        normalizedTarget * encoderDirection[1],
+        normalizedTarget * encoderDirection[2],
+        normalizedTarget * encoderDirection[3],
     };
 
     const int32_t toleranceCounts = max(
@@ -759,11 +781,8 @@ void Motors::resetEncoders() {
 // ---------- Calibrated distance helpers ----------
 
 int32_t Motors::getNormalizedCounts(uint8_t axis) const {
-    if (axis >= 4) {
-        return 0;
-    }
-
-    return encCounts[axis] * AXIS_SIGN[axis];
+    if (axis >= 4) return 0;
+    return encCounts[axis] * encoderDirection[axis];
 }
 
 float Motors::getWheelMM(uint8_t axis) const {
@@ -784,6 +803,10 @@ float Motors::getRobotRearDistanceM() const {
     return getRobotRearDistanceMM() / 1000.0f;
 }
 
+float Motors::getRearWheelDisagreementMM() const {
+    return fabsf(getWheelMM(2) - getWheelMM(3));
+}
+
 int32_t Motors::mm_to_distance_counts(float mm) const {
     if (!isfinite(mm)) {
         mm = 0.0f;
@@ -793,18 +816,14 @@ int32_t Motors::mm_to_distance_counts(float mm) const {
 }
 
 void Motors::setRobotRearDistanceMM(float mm) {
-    if (!isfinite(mm)) {
-        mm = 0.0f;
-    }
+    if (!isfinite(mm)) mm = 0.0f;
 
     const int32_t normalizedCounts = mm_to_distance_counts(mm);
+    const int32_t raw0 = normalizedCounts * encoderDirection[0];
+    const int32_t raw1 = normalizedCounts * encoderDirection[1];
+    const int32_t raw2 = normalizedCounts * encoderDirection[2];
+    const int32_t raw3 = normalizedCounts * encoderDirection[3];
 
-    const int32_t raw0 = normalizedCounts * AXIS_SIGN[0];
-    const int32_t raw1 = normalizedCounts * AXIS_SIGN[1];
-    const int32_t raw2 = normalizedCounts * AXIS_SIGN[2];
-    const int32_t raw3 = normalizedCounts * AXIS_SIGN[3];
-
-    // Stop before forcing encoder values.
     STOP();
     delay(10);
 
@@ -812,19 +831,13 @@ void Motors::setRobotRearDistanceMM(float mm) {
     rcA.SetEncM2(ADDR_A, u32bits(raw1));
     rcB.SetEncM1(ADDR_B, u32bits(raw2));
     rcB.SetEncM2(ADDR_B, u32bits(raw3));
-
     delay(20);
 
-    // Update local cache immediately so the HMI reflects the set value
-    // without waiting for the next poll.
     encCounts[0] = raw0;
     encCounts[1] = raw1;
     encCounts[2] = raw2;
     encCounts[3] = raw3;
-
-    for (int i = 0; i < 4; ++i) {
-        qpps[i] = 0;
-    }
+    for (int i = 0; i < 4; ++i) qpps[i] = 0;
 }
 
 void Motors::setRobotRearDistanceM(float meters) {
@@ -898,14 +911,8 @@ bool Motors::readMotorDiagnostic(
     return requiredValid;
 }
 
-int8_t Motors::expectedEncoderDirection(
-    uint8_t axis,
-    float speedMps
-) const {
-    if (axis >= 4 || !isfinite(speedMps) || speedMps == 0.0f) {
-        return 0;
-    }
-
-    const int8_t commandSign = speedMps > 0.0f ? 1 : -1;
-    return static_cast<int8_t>(commandSign * motorDirection[axis]);
+int8_t Motors::expectedEncoderDirection(uint8_t axis, float speedMps) const {
+    if (axis >= 4 || !isfinite(speedMps) || speedMps == 0.0f) return 0;
+    const int8_t robotDirection = speedMps > 0.0f ? 1 : -1;
+    return static_cast<int8_t>(robotDirection * encoderDirection[axis]);
 }

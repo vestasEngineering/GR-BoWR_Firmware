@@ -17,6 +17,8 @@
 #include "EncoderSession.hpp"
 #include "DiagnosticRunner.hpp"
 #include "FeedforwardConfiguration.hpp"
+#include <limits.h>
+#include <string.h>
 
 
 class AndonManager;
@@ -70,6 +72,17 @@ public:
         bool waitingToDeactivate = false;
     };
     std::vector<Trigger> triggerBuffer;
+    
+    struct DirectionTestState {
+        bool active = false;
+        uint8_t axis = 0;
+        uint32_t expiresAtMs = 0;
+        int32_t startCount = 0;
+        int8_t testedMotorDirection = 1;
+        int8_t testedEncoderDirection = 1;
+        char transactionId[80] = {0};
+    };
+    DirectionTestState directionTest_;
 
     // Wiring to other subsystems
     AndonManager* andonMgr = nullptr;
@@ -293,7 +306,18 @@ public:
                              pausedOrJog, batteryLow, running, empty);
     }
 
+    void updateDirectionTest() {
+        if (!directionTest_.active) return;
 
+        if (static_cast<int32_t>(millis() - directionTest_.expiresAtMs) >= 0) {
+            stopDirectionTest("lease_expired");
+            return;
+        }
+
+        float command[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        command[directionTest_.axis] = 0.025f;
+        motors->setSpeeds(command[0], command[1], command[2], command[3]);
+    }
 
     enum class LinkState { CONNECTED, DISCONNECTED };
     LinkState state;
@@ -313,7 +337,8 @@ public:
     }
 
     void stateMachine(void) {
-        receiveLinux();  // refresh timeout if traffic arrives
+        receiveLinux(); // refresh timeout if traffic arrives
+        updateDirectionTest();  
         checkTriggers(); // encoder-driven triggers
 
         unsigned long now = millis();
@@ -568,6 +593,72 @@ public:
         else if (s.equalsIgnoreCase("BLINK_RED"))     out = AndonLight::BLINK_RED;
         else return false;
         return true;
+    }
+
+    void stopDirectionTest(const char* reason) {
+        if (!directionTest_.active) return;
+
+        const uint8_t axis = directionTest_.axis;
+        const int32_t startCount = directionTest_.startCount;
+        const int8_t testedMotorDirection = directionTest_.testedMotorDirection;
+        const int8_t testedEncoderDirection = directionTest_.testedEncoderDirection;
+        char transactionId[sizeof(directionTest_.transactionId)];
+        strlcpy(transactionId, directionTest_.transactionId, sizeof(transactionId));
+
+        motors->BRAKE_STOP();
+        delay(30);
+
+        int32_t endCount = startCount;
+        int32_t speedQpps = 0;
+        uint8_t encoderStatus = 0;
+        uint8_t speedStatus = 0;
+        const bool feedbackValid = motors->readMotorMotionFeedback(
+            axis,
+            endCount,
+            speedQpps,
+            encoderStatus,
+            speedStatus
+        );
+
+        const int64_t delta64 =
+            static_cast<int64_t>(endCount) - static_cast<int64_t>(startCount);
+        const bool deltaFitsI32 =
+            delta64 >= INT32_MIN && delta64 <= INT32_MAX;
+        const int32_t rawDelta = deltaFitsI32
+            ? static_cast<int32_t>(delta64)
+            : 0;
+        const int64_t normalizedDelta64 =
+            delta64 * static_cast<int64_t>(testedEncoderDirection);
+
+        directionTest_.active = false;
+        directionTest_.expiresAtMs = 0;
+        directionTest_.transactionId[0] = '\0';
+
+        StaticJsonDocument<512> response;
+        response["type"] = "drive_direction_test_result";
+        response["transaction_id"] = transactionId;
+        response["axis"] = axis;
+        response["ok"] = feedbackValid && deltaFitsI32;
+        response["reason"] = reason;
+        response["start_raw_count"] = startCount;
+        response["end_raw_count"] = endCount;
+        response["delta_raw_count"] = rawDelta;
+        response["normalized_delta_count"] = normalizedDelta64;
+        response["tested_motor_direction"] = testedMotorDirection;
+        response["tested_encoder_direction"] = testedEncoderDirection;
+        response["speed_qpps"] = speedQpps;
+        response["encoder_status"] = encoderStatus;
+        response["speed_status"] = speedStatus;
+        response["ts_ms"] = millis();
+
+        if (!feedbackValid) {
+            response["error"] = "encoder_feedback_invalid";
+        } else if (!deltaFitsI32) {
+            response["error"] = "encoder_delta_overflow";
+        }
+
+        serializeJson(response, *io);
+        io->println();
     }
 
     void updateParameters() {
@@ -1843,6 +1934,116 @@ public:
             serializeJson(response, *io);
             io->println();
         }
+        else if (
+            action.equalsIgnoreCase(
+                "set_drive_direction_configuration"
+            )
+        ) {
+            const char* transactionId =
+                jsonPacket["transaction_id"] | "";
+
+            JsonArrayConst motorValues =
+                jsonPacket["motor_directions"]
+                    .as<JsonArrayConst>();
+
+            JsonArrayConst encoderValues =
+                jsonPacket["encoder_directions"]
+                    .as<JsonArrayConst>();
+
+            StaticJsonDocument<384> response;
+
+            response["type"] =
+                "drive_direction_configuration_ack";
+            response["transaction_id"] =
+                transactionId;
+            response["ts_ms"] =
+                millis();
+
+            bool valid =
+                transactionId[0] != '\0' &&
+                motorValues.size() == 4 &&
+                encoderValues.size() == 4;
+
+            int8_t motor[4] = {};
+            int8_t encoder[4] = {};
+
+            for (
+                uint8_t i = 0;
+                valid && i < 4;
+                ++i
+            ) {
+                motor[i] =
+                    motorValues[i].as<int>();
+
+                encoder[i] =
+                    encoderValues[i].as<int>();
+
+                valid =
+                    (motor[i] == 1 || motor[i] == -1) &&
+                    (encoder[i] == 1 || encoder[i] == -1);
+            }
+
+            const bool processActive =
+                ultrasonicEnabled_ &&
+                *ultrasonicEnabled_;
+
+            if (!valid) {
+                response["ok"] = false;
+                response["error"] =
+                    "invalid_drive_direction_configuration";
+            } else if (!encoderSession_) {
+                response["ok"] = false;
+                response["error"] =
+                    "encoder_session_not_attached";
+            } else if (directionTest_.active) {
+                response["ok"] = false;
+                response["error"] =
+                    "direction_test_active";
+            } else if (processActive) {
+                response["ok"] = false;
+                response["error"] =
+                    "process_active";
+            } else if (
+                diagnosticRunner_ &&
+                diagnosticRunner_->active()
+            ) {
+                response["ok"] = false;
+                response["error"] =
+                    "diagnostic_active";
+            } else {
+                applyDriveDirectionConfiguration_(
+                    motor,
+                    encoder,
+                    transactionId,
+                    response
+                );
+            }
+
+            serializeJson(response, *io);
+            io->println();
+        }
+        else if (action.equalsIgnoreCase("stop_drive_direction_test")) {
+            const char* transactionId = jsonPacket["transaction_id"] | "";
+            const bool matches = directionTest_.active &&
+                strcmp(transactionId, directionTest_.transactionId) == 0;
+
+            if (matches) {
+                stopDirectionTest("operator_release");
+            } else {
+                motors->BRAKE_STOP();
+                StaticJsonDocument<224> response;
+                response["type"] = "drive_direction_test_result";
+                response["transaction_id"] = transactionId;
+                response["ok"] = false;
+                response["error"] = "direction_test_transaction_mismatch";
+                response["ts_ms"] = millis();
+                serializeJson(response, *io);
+                io->println();
+            }
+        }
+        else if (action.equalsIgnoreCase("start_drive_direction_test")) {
+            handleStartDriveDirectionTest_();
+        }
         else if (action.equalsIgnoreCase("jog")) {
             if (!jogControl) {
                 StaticJsonDocument<192> response;
@@ -2046,7 +2247,7 @@ public:
     }
 
     void emitEncoderStatus() {
-        StaticJsonDocument<768> doc;
+        StaticJsonDocument<1024> doc;
         const float rearMm = motors->getRobotRearDistanceMM();
         doc["type"] = "encoder";
         doc["valid"] = encoderSession_ ? encoderSession_->valid() : false;
@@ -2057,9 +2258,19 @@ public:
         doc["radius_m"] = rearMm / 1000.0f;
         doc["rear_distance_mm"] = rearMm;
         doc["ts_ms"] = millis();
+
+        // Public counts are robot-frame normalized. Forward must be positive.
         JsonArray counts = doc.createNestedArray("counts");
-        for (int i = 0; i < 4; ++i) counts.add(motors->encCounts[i]);
-        serializeJson(doc, *io); io->println();
+        JsonArray rawCounts = doc.createNestedArray("raw_counts");
+        JsonArray directions = doc.createNestedArray("encoder_directions");
+        for (uint8_t axis = 0; axis < 4; ++axis) {
+            counts.add(motors->getNormalizedCounts(axis));
+            rawCounts.add(motors->encCounts[axis]);
+            directions.add(motors->encoderDirection[axis]);
+        }
+
+        serializeJson(doc, *io);
+        io->println();
     }
 
     void emitProcessStatus(
@@ -2129,6 +2340,117 @@ public:
         }
 
         serializeJson(doc, *io);
+        io->println();
+    }
+
+    void applyDriveDirectionConfiguration_(
+        const int8_t motor[4],
+        const int8_t encoder[4],
+        const char* transactionId,
+        StaticJsonDocument<384>& response
+    ) {
+        motors->BRAKE_STOP();
+        motors->setMotorDirections(motor[0], motor[1], motor[2], motor[3]);
+        motors->setEncoderDirections(encoder[0], encoder[1], encoder[2], encoder[3]);
+        encoderSession_->configurationChanged(
+            "drive_direction_configuration_changed",
+            transactionId
+        );
+
+        response["ok"] = true;
+        response["encoder_restore_required"] = true;
+        response["encoder_session_id"] = encoderSession_->sessionId();
+        response["motion_inhibited"] = motors->isMotionInhibited();
+
+        JsonArray appliedMotor = response.createNestedArray("motor_directions");
+        JsonArray appliedEncoder = response.createNestedArray("encoder_directions");
+        for (uint8_t i = 0; i < 4; ++i) {
+            appliedMotor.add(motors->motorDirection[i]);
+            appliedEncoder.add(motors->encoderDirection[i]);
+        }
+    }
+
+    void handleStartDriveDirectionTest_() {
+        const char* transactionId = jsonPacket["transaction_id"] | "";
+        const int axis = jsonPacket["axis"] | -1;
+        uint32_t leaseMs = jsonPacket["lease_ms"] | 350;
+
+        StaticJsonDocument<384> response;
+        response["type"] = "drive_direction_test_ack";
+        response["transaction_id"] = transactionId;
+        response["axis"] = axis;
+        response["ts_ms"] = millis();
+
+        const bool processActive = ultrasonicEnabled_ && *ultrasonicEnabled_;
+
+        if (transactionId[0] == '\0') {
+            response["ok"] = false;
+            response["error"] = "missing_transaction_id";
+        } else if (strlen(transactionId) >= sizeof(directionTest_.transactionId)) {
+            response["ok"] = false;
+            response["error"] = "transaction_id_too_long";
+        } else if (axis < 0 || axis >= 4) {
+            response["ok"] = false;
+            response["error"] = "invalid_axis";
+        } else if (directionTest_.active) {
+            response["ok"] = false;
+            response["error"] = "direction_test_active";
+        } else if (processActive) {
+            response["ok"] = false;
+            response["error"] = "process_active";
+        } else if (diagnosticRunner_ && diagnosticRunner_->active()) {
+            response["ok"] = false;
+            response["error"] = "diagnostic_active";
+        } else if (!encoderSession_ || !encoderSession_->motorPowerPresent()) {
+            response["ok"] = false;
+            response["error"] = "motor_power_absent";
+        } else if (motors->isMotionInhibited()) {
+            response["ok"] = false;
+            response["error"] = "motion_inhibited";
+        } else {
+            leaseMs = constrain(leaseMs, 250UL, 2000UL);
+
+            int32_t count = 0;
+            int32_t speed = 0;
+            uint8_t encoderStatus = 0;
+            uint8_t speedStatus = 0;
+            const bool valid = motors->readMotorMotionFeedback(
+                static_cast<uint8_t>(axis),
+                count,
+                speed,
+                encoderStatus,
+                speedStatus
+            );
+
+            if (!valid) {
+                response["ok"] = false;
+                response["error"] = "encoder_feedback_invalid";
+            } else {
+                motors->BRAKE_STOP();
+                directionTest_.active = true;
+                directionTest_.axis = static_cast<uint8_t>(axis);
+                directionTest_.expiresAtMs = millis() + leaseMs;
+                directionTest_.startCount = count;
+                directionTest_.testedMotorDirection = motors->motorDirection[axis];
+                directionTest_.testedEncoderDirection = motors->encoderDirection[axis];
+                strlcpy(
+                    directionTest_.transactionId,
+                    transactionId,
+                    sizeof(directionTest_.transactionId)
+                );
+
+                response["ok"] = true;
+                response["accepted"] = true;
+                response["lease_ms"] = leaseMs;
+                response["start_raw_count"] = count;
+                response["tested_motor_direction"] =
+                    directionTest_.testedMotorDirection;
+                response["tested_encoder_direction"] =
+                    directionTest_.testedEncoderDirection;
+            }
+        }
+
+        serializeJson(response, *io);
         io->println();
     }
 

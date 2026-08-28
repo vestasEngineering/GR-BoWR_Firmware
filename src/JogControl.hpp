@@ -71,29 +71,21 @@ public:
         if (direction != 1 && direction != -1) {
             return RemoteJogResult::INVALID_DIRECTION;
         }
-
         if (!isValidSessionId(sessionId)) {
             return RemoteJogResult::INVALID_SESSION;
         }
-
         if (activeSource == Source::PHYSICAL) {
             return RemoteJogResult::PHYSICAL_JOG_ACTIVE;
         }
-
         if (motors.isMotionInhibited()) {
             return RemoteJogResult::MOTION_INHIBITED;
         }
 
         const bool newSession = strcmp(remoteSessionId, sessionId) != 0;
-
         if (newSession) {
-            // A new HMI runtime or newly armed control session may start its
-            // sequence at one. Stop the old remote command before changing
-            // ownership so motion never carries across sessions.
             if (activeSource == Source::REMOTE) {
                 stopAllJog();
             }
-
             copySessionId(sessionId);
             remoteSeqInitialized = false;
             lastRemoteSeq = 0;
@@ -105,38 +97,28 @@ public:
 
         remoteSeqInitialized = true;
         lastRemoteSeq = seq;
-
-        const float safeSpeed = clampFloat(
+        remoteDirection = direction;
+        remoteSpeedMs = clampFloat(
             fabsf(requestedSpeedMs),
             0.0f,
             getRemoteMaxSpeed()
         );
-
-        const unsigned long safeLease = clampUL(
+        remoteExpireMs = millis() + clampUL(
             requestedLeaseMs == 0
                 ? REMOTE_JOG_DEFAULT_LEASE_MS
                 : requestedLeaseMs,
             1,
             REMOTE_JOG_MAX_LEASE_MS
         );
-
-        remoteDirection = direction;
-        remoteSpeedMs = safeSpeed;
-        remoteExpireMs = millis() + safeLease;
         activeSource = Source::REMOTE;
-
         return RemoteJogResult::ACCEPTED;
     }
 
     bool stopRemoteJog(const char* sessionId, uint32_t seq = 0) {
-        if (!isValidSessionId(sessionId)) {
-            return false;
-        }
-
+        if (!isValidSessionId(sessionId)) return false;
         if (remoteSessionId[0] == '\0' || strcmp(remoteSessionId, sessionId) != 0) {
             return false;
         }
-
         if (seq != 0) {
             if (remoteSeqInitialized && !isSequenceNewer(seq, lastRemoteSeq)) {
                 return false;
@@ -144,18 +126,12 @@ public:
             remoteSeqInitialized = true;
             lastRemoteSeq = seq;
         }
-
-        if (activeSource == Source::REMOTE) {
-            stopAllJog();
-        }
-
+        if (activeSource == Source::REMOTE) stopAllJog();
         return true;
     }
 
     void invalidateRemoteSession() {
-        if (activeSource == Source::REMOTE) {
-            stopAllJog();
-        }
+        if (activeSource == Source::REMOTE) stopAllJog();
         remoteSessionId[0] = '\0';
         remoteSeqInitialized = false;
         lastRemoteSeq = 0;
@@ -180,15 +156,11 @@ private:
     char remoteSessionId[REMOTE_SESSION_ID_MAX_CHARS + 1];
 
     static bool isSequenceNewer(uint32_t candidate, uint32_t previous) {
-        // Signed subtraction gives wrap-safe ordering for differences smaller
-        // than half the uint32 range.
         return static_cast<int32_t>(candidate - previous) > 0;
     }
 
     static bool isValidSessionId(const char* sessionId) {
-        if (sessionId == nullptr || sessionId[0] == '\0') {
-            return false;
-        }
+        if (sessionId == nullptr || sessionId[0] == '\0') return false;
         const size_t length = strnlen(sessionId, REMOTE_SESSION_ID_MAX_CHARS + 1);
         return length > 0 && length <= REMOTE_SESSION_ID_MAX_CHARS;
     }
@@ -212,9 +184,7 @@ private:
 
     float getRemoteMaxSpeed() const {
         const float configuredMax = CFG.jog.jog_speed_max_ms;
-        if (configuredMax <= 0.0f) {
-            return REMOTE_JOG_MAX_SPEED_MS;
-        }
+        if (configuredMax <= 0.0f) return REMOTE_JOG_MAX_SPEED_MS;
         return min(configuredMax, REMOTE_JOG_MAX_SPEED_MS);
     }
 
@@ -230,69 +200,41 @@ private:
     }
 
     void updateRemoteJog() {
-        if (activeSource != Source::REMOTE) {
-            return;
-        }
-
-        const unsigned long now = millis();
-        if (static_cast<long>(now - remoteExpireMs) >= 0) {
-            // Keep the session and sequence after lease expiry so delayed
-            // messages from this same session remain rejectable. A genuinely
-            // new HMI session is accepted through its new session ID.
+        if (activeSource != Source::REMOTE) return;
+        if (static_cast<long>(millis() - remoteExpireMs) >= 0) {
             stopAllJog();
         }
     }
 
     void updatePhysicalJog() {
-        const bool forwardPressed =
-            !digitalRead(CFG.jog.pin_forward);
+        const bool forwardPressed = !digitalRead(CFG.jog.pin_forward);
+        const bool backwardPressed = !digitalRead(CFG.jog.pin_backward);
 
-        const bool backwardPressed =
-            !digitalRead(CFG.jog.pin_backward);
-
-        if (activeSource == Source::REMOTE) {
-            return;
-        }
+        if (activeSource == Source::REMOTE) return;
 
         if (forwardPressed && backwardPressed) {
-            if (activeSource == Source::PHYSICAL) {
-                stopAllJog();
-            }
+            if (activeSource == Source::PHYSICAL) stopAllJog();
             return;
         }
 
-        if (
-            activeSource == Source::PHYSICAL &&
-            !forwardPressed &&
-            !backwardPressed
-        ) {
+        if (activeSource == Source::PHYSICAL &&
+            !forwardPressed && !backwardPressed) {
             stopAllJog();
             return;
         }
 
-        if (
-            (forwardPressed || backwardPressed) &&
-            !physicalJogActive
-        ) {
+        if ((forwardPressed || backwardPressed) && !physicalJogActive) {
             physicalJogActive = true;
             physicalStartMs = millis();
-            physicalDirection =
-                forwardPressed ? -1 : 1;
+
+            // Robot-frame convention: forward is +1 and backward is -1.
+            physicalDirection = forwardPressed ? 1 : -1;
             activeSource = Source::PHYSICAL;
         }
 
-        if (
-            activeSource == Source::PHYSICAL &&
-            physicalJogActive
-        ) {
-            const unsigned long now = millis();
-
-            if (
-                now - physicalStartMs >=
-                CFG.jog.jog_duration_ms
-            ) {
-                stopAllJog();
-            }
+        if (activeSource == Source::PHYSICAL && physicalJogActive &&
+            millis() - physicalStartMs >= CFG.jog.jog_duration_ms) {
+            stopAllJog();
         }
     }
 
@@ -301,24 +243,81 @@ private:
             return;
         }
 
-        int direction = 0;
-        float speed = 0.0f;
+        float robotVelocity = 0.0f;
 
         if (activeSource == Source::REMOTE) {
-            direction = remoteDirection;
-            speed = remoteSpeedMs;
-        } else if (activeSource == Source::PHYSICAL) {
-            direction = physicalDirection;
-            speed = CFG.jog.jog_speed_max_ms;
+            /*
+            * Remote convention:
+            *
+            *   +1 = robot forward
+            *   -1 = robot backward
+            */
+            if (
+                remoteDirection == 0 ||
+                remoteSpeedMs <= 0.0f
+            ) {
+                stopAllJog();
+                return;
+            }
+
+            robotVelocity =
+                static_cast<float>(
+                    remoteDirection
+                ) *
+                remoteSpeedMs;
+        }
+        else if (
+            activeSource == Source::PHYSICAL
+        ) {
+            /*
+            * Physical-button wiring convention:
+            *
+            *   forward button  = -1
+            *   backward button = +1
+            *
+            * Invert it here to convert it into the
+            * common robot-frame convention:
+            *
+            *   positive = robot forward
+            *   negative = robot backward
+            */
+            if (
+                physicalDirection == 0 ||
+                CFG.jog.jog_speed_max_ms <= 0.0f
+            ) {
+                stopAllJog();
+                return;
+            }
+
+            robotVelocity =
+                -static_cast<float>(
+                    physicalDirection
+                ) *
+                CFG.jog.jog_speed_max_ms;
         }
 
-        if (direction == 0 || speed <= 0.0f || motors.isMotionInhibited()) {
+        if (
+            motors.isMotionInhibited() ||
+            fabsf(robotVelocity) <
+                Motors::ZERO_SPEED_THRESHOLD_MS
+        ) {
             stopAllJog();
             return;
         }
 
-        const float velocity = -direction * speed;
-        motors.setSpeeds(-velocity, -velocity, velocity, velocity);
+        /*
+        * Straight-line robot-frame command.
+        *
+        * Every axis receives the same logical direction.
+        * Motors::motorDirection[] performs the individual
+        * installation-polarity correction.
+        */
+        motors.setSpeeds(
+            robotVelocity,
+            robotVelocity,
+            robotVelocity,
+            robotVelocity
+        );
     }
 };
 

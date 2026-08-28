@@ -197,8 +197,8 @@ public:
                     motors->setSpeeds(
                         processSpeed,
                         processSpeed,
-                        -processSpeed,
-                        -processSpeed
+                        processSpeed,
+                        processSpeed
                     );
                 }
             }
@@ -413,8 +413,8 @@ public:
                     motors->setSpeeds(
                         processSpeed,
                         processSpeed,
-                        -processSpeed,
-                        -processSpeed
+                        processSpeed,
+                        processSpeed
                     );
                 }
 
@@ -424,8 +424,8 @@ public:
                 motors->setSpeeds(
                     processSpeed,
                     processSpeed,
-                    -processSpeed,
-                    -processSpeed
+                    processSpeed,
+                    processSpeed
                 );
             }
         }

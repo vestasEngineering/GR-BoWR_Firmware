@@ -6,7 +6,14 @@
 
 class EncoderSession {
 public:
-  enum class State : uint8_t { STARTUP_RECOVERY, POWER_LOST, WAITING_FOR_RESTORE, RESTORING, VALID, RESTORE_FAILED };
+  enum class State : uint8_t {
+    STARTUP_RECOVERY,
+    POWER_LOST,
+    WAITING_FOR_RESTORE,
+    RESTORING,
+    VALID,
+    RESTORE_FAILED
+  };
 
   EncoderSession(ContactorMonitor& contactor, Motors& motors, Stream& io)
       : contactor_(contactor), motors_(motors), io_(io) {}
@@ -52,11 +59,20 @@ public:
     return true;
   }
 
+  void configurationChanged(const char* reason, const char* transactionId = nullptr) {
+    ++sessionId_;
+    valid_ = false;
+    restoreRequired_ = true;
+    state_ = contactor_.powerPresent() ? State::WAITING_FOR_RESTORE : State::POWER_LOST;
+    motors_.setMotionInhibited(true);
+    motors_.BRAKE_STOP();
+    emitState(reason, transactionId);
+  }
+
   void transactionSucceeded(const char* source, const char* transactionId) {
     valid_ = true;
     restoreRequired_ = false;
     state_ = State::VALID;
-    // Releasing this gate does not restore stored speeds: Motors clears commands on release.
     motors_.setMotionInhibited(false);
     emitState(source, transactionId);
   }
@@ -73,6 +89,7 @@ public:
   bool restoreRequired() const { return restoreRequired_; }
   bool motorPowerPresent() const { return contactor_.powerPresent(); }
   uint32_t sessionId() const { return sessionId_; }
+
   const char* stateString() const {
     switch (state_) {
       case State::STARTUP_RECOVERY: return "startup_recovery";
@@ -96,7 +113,8 @@ public:
     doc["reason"] = reason;
     doc["ts_ms"] = millis();
     if (transactionId && transactionId[0]) doc["transaction_id"] = transactionId;
-    serializeJson(doc, io_); io_.println();
+    serializeJson(doc, io_);
+    io_.println();
   }
 
 private:
