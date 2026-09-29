@@ -8,7 +8,6 @@
 #include <Version.hpp>
 #include <ArduinoJson.h>
 #include "EStop.hpp"
-#include "ClampSensor.hpp"
 
 namespace BootHealth {
 
@@ -85,13 +84,6 @@ static void checkBattery(BatteryMonitor* b, BootHealth::Report& r) {
     // Consider OK unless critically low (below 10%)
     r.battery_ok = (pct > 10.0f);
 }
-
-
-static void checkClamp(const ClampSensor& c, BootHealth::Report& r) {
-    r.clamp_state = c.isClamped();
-    r.clamp_ok    = r.clamp_state;
-}
-
 
 BootHealth::Report run(AndonLight& light,
                        Motors& motors,

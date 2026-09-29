@@ -14,7 +14,7 @@
 // Choose clear, short model IDs and a stable fleet ID (asset tag/SN).
 #ifndef ROBOT_MODEL
   // e.g. "GR-LRR" for your unit; override via build flags for other models.
-  #define ROBOT_MODEL        "GR-LRR"
+  #define ROBOT_MODEL        "GR-BoWR"
 #endif
 
 #ifndef ROBOT_FLEET_ID

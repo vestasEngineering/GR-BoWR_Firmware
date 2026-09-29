@@ -65,14 +65,6 @@ struct BatteryCfg {
 };
 
 
-struct ClampCfg {
-    int       pin                 = D6;      // TLP785 output into Portenta H7
-    bool      active_high         = true;    // HIGH = clamped OK
-    uint16_t  debounce_ms         = 20;      // input debounce
-    uint32_t  emit_ms             = 1000;    // optional telemetry cadence (if you want to emit)
-};
-
-
 struct EStopCfg {
     int      pin                = D0;
     bool     active_high        = false;
@@ -177,7 +169,6 @@ struct RobotConfig {
     UltrasonicCfg      ultrasonic;
     UltrasonicServoCfg ut_servo;
     SerialCfg          serial;
-    ClampCfg           clamp;
     ContactorCfg       contactor;
 };
 

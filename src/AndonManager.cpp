@@ -9,7 +9,6 @@
 #include "UltrasonicServo.hpp"
 #include "Config.hpp"
 #include "EStop.hpp"
-#include "ClampSensor.hpp"
 #include "ContactorMonitor.hpp"
 
 constexpr AndonManager::Config AndonManager::kDefaultCfg;
@@ -23,7 +22,6 @@ const char* AndonManager::faultToKey(FaultCode f) {
     case FaultCode::UltrasonicPersistent:  return "ultrasonic_bad";
     case FaultCode::UltrasonicServoFault:  return "ultrasonic_servo_fault";
     case FaultCode::ActuatorFault:         return "actuator_fault";
-    case FaultCode::ClampUnclamped:        return "clamp_unclamped";
     case FaultCode::Motor0Fault:           return "motor0_fault";
     case FaultCode::Motor1Fault:           return "motor1_fault";
     case FaultCode::Motor2Fault:           return "motor2_fault";
@@ -40,7 +38,6 @@ const char* AndonManager::faultToModuleId(FaultCode f) {
     case FaultCode::UltrasonicPersistent:   return "ultrasonic";
     case FaultCode::UltrasonicServoFault:   return "ultrasonic_servo";
     case FaultCode::ActuatorFault:          return "actuator_1";
-    case FaultCode::ClampUnclamped:         return "clamp_sensor";
     case FaultCode::Motor0Fault:            return "motor_1";
     case FaultCode::Motor1Fault:            return "motor_2";
     case FaultCode::Motor2Fault:            return "motor_3";
@@ -58,13 +55,12 @@ AndonManager::AndonManager(AndonLight& light,
                            Ultrasonic& ultrasonic,
                            UltrasonicServo& ut_servo,
                            EStop& estop,
-                           ClampSensor& clamp,
                            ContactorMonitor& contactor,
                            bool& hmiConnected,
                            Config cfg)
 : light_(light), link_(link), motors_(motors), actuator_(actuator),
   jog_(jog), battery_(battery), ultrasonic_(ultrasonic), ut_servo_(ut_servo),
-  cfg_(cfg), estop_(estop), clamp_(clamp), contactor_(contactor),
+  cfg_(cfg), estop_(estop), contactor_(contactor),
   hmi_connected_(hmiConnected) {}
 
 void AndonManager::setup() {
@@ -140,7 +136,6 @@ void AndonManager::enforceMotionSafety() {
 
 bool AndonManager::hasFault() const {
   if (isContactorPowerLost()) return true;
-  if (!clamp_.isClamped()) return true;
   if (battery_.isCritical(CFG.battery.critical_pct)) return true;
   return false;
 }
@@ -149,7 +144,6 @@ void AndonManager::collectFaults(std::vector<AndonManager::FaultCode>& out) cons
   out.clear();
   if (isEStop()) out.push_back(FaultCode::EStopActive);
   if (isContactorPowerLost()) out.push_back(FaultCode::ContactorPowerLost);
-  if (!clamp_.isClamped()) out.push_back(FaultCode::ClampUnclamped);
   if (battery_.isCritical(CFG.battery.critical_pct)) out.push_back(FaultCode::BatteryCritical);
 }
 

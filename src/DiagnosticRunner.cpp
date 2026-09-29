@@ -6,9 +6,9 @@ static int32_t safeAbs32(int32_t v){ return v==INT32_MIN ? INT32_MAX : abs(v); }
 
 DiagnosticRunner::DiagnosticRunner(Stream& io, Motors& motors, ActuatorControl& actuator,
  BatteryMonitor& battery, Ultrasonic& ultrasonic, UltrasonicServo& servo,
- AndonManager& andon, EStop& estop, ClampSensor& clamp, JogControl& jog, bool& processEnabled)
+ AndonManager& andon, EStop& estop, JogControl& jog, bool& processEnabled)
  : io_(io), motors_(motors), actuator_(actuator), battery_(battery), ultrasonic_(ultrasonic),
- servo_(servo), andon_(andon), estop_(estop), clamp_(clamp), jog_(jog), processEnabled_(processEnabled) {}
+ servo_(servo), andon_(andon), estop_(estop), jog_(jog), processEnabled_(processEnabled) {}
 
 bool DiagnosticRunner::copyIdentity(const JsonDocument& command)
 {
@@ -53,11 +53,6 @@ bool DiagnosticRunner::preflight(
 
     if (motionDiagnostic && estop_.isActive()) {
         reason = "estop_active";
-        return false;
-    }
-
-    if (motionDiagnostic && !clamp_.isClamped()) {
-        reason = "clamp_not_confirmed";
         return false;
     }
 
@@ -373,7 +368,6 @@ void DiagnosticRunner::emitProgress(
     doc["process_enabled"] = processEnabled_;
     doc["jog_active"] = jog_.isActive();
     doc["estop_active"] = estop_.isActive();
-    doc["clamp_confirmed"] = clamp_.isClamped();
     doc["motion_inhibited"] =
         motors_.isMotionInhibited();
     doc["actuator_pcb_fault"] =
@@ -754,83 +748,9 @@ bool DiagnosticRunner::startSensor(const JsonDocument& command) {
         return true;
     }
 
-    if (!strcasecmp(sensor, "clamp")) {
-        clampOpenReading_ = false;
-        clampClosedReading_ = false;
-        clampOpenRaw_ = false;
-        clampClosedRaw_ = false;
-        guidedConfirmationStartedAtMs_ = millis();
-        state_ = State::ClampAwaitingOpenConfirmation;
-        emitClampProgress("awaiting_clamp_open_confirmation", false);
-        return true;
-    }
-
     emitRejected("unsupported_sensor_test");
     clearRun();
     return false;
-}
-
-void DiagnosticRunner::emitClampProgress(const char* phase, bool expectedClamped) {
-    StaticJsonDocument<384> doc;
-    doc["type"] = "diagnostic_progress";
-    doc["category"] = "clamp";
-    doc["run_id"] = runId_;
-    doc["transaction_id"] = transactionId_;
-    doc["id"] = moduleId_;
-    doc["phase"] = phase;
-    doc["expected_clamped"] = expectedClamped;
-    doc["confirmation_timeout_ms"] = kGuidedConfirmationTimeoutMs;
-    doc["ts_ms"] = millis();
-    serializeJson(doc, io_);
-    io_.println();
-}
-
-bool DiagnosticRunner::confirmClampState(const JsonDocument& command) {
-    const char* run = command["run_id"] | "";
-    const char* transaction = command["transaction_id"] | "";
-    const char* module = command["id"] | "";
-    const bool expected = command["expected_clamped"] | false;
-
-    if (strcmp(run, runId_) || strcmp(transaction, transactionId_) ||
-        strcmp(module, moduleId_)) return false;
-
-    if (state_ == State::ClampAwaitingOpenConfirmation && !expected) {
-        clampOpenReading_ = clamp_.isClamped();
-        clampOpenRaw_ = clamp_.rawLevel();
-        guidedConfirmationStartedAtMs_ = millis();
-        state_ = State::ClampAwaitingClosedConfirmation;
-        emitClampProgress("awaiting_clamp_closed_confirmation", true);
-        return true;
-    }
-
-    if (state_ == State::ClampAwaitingClosedConfirmation && expected) {
-        clampClosedReading_ = clamp_.isClamped();
-        clampClosedRaw_ = clamp_.rawLevel();
-        finishClampDiagnostic();
-        return true;
-    }
-
-    return false;
-}
-
-void DiagnosticRunner::finishClampDiagnostic() {
-    const bool changed = clampOpenReading_ != clampClosedReading_;
-    const bool pass = !clampOpenReading_ && clampClosedReading_ && changed;
-    const char* reason = pass ? "clamp_sensor_passed" :
-        (clampOpenReading_ ? "clamp_indicates_closed_when_open" :
-         (!clampClosedReading_ ? "clamp_indicates_open_when_closed" :
-          "clamp_sensor_state_did_not_change"));
-
-    StaticJsonDocument<384> measurementsDoc;
-    JsonObject measurements = measurementsDoc.to<JsonObject>();
-    measurements["open_clamped"] = clampOpenReading_;
-    measurements["closed_clamped"] = clampClosedReading_;
-    measurements["open_raw_level"] = clampOpenRaw_;
-    measurements["closed_raw_level"] = clampClosedRaw_;
-    measurements["state_changed"] = changed;
-    measurements["debounce_ms"] = clamp_.debounceMs();
-    emitTerminal(pass, reason, measurements);
-    clearRun();
 }
 
 bool DiagnosticRunner::startAndon(const JsonDocument&) {
@@ -915,10 +835,6 @@ void DiagnosticRunner::update() {
         return;
     }
 
-    const bool clampObservationState =
-        state_ == State::ClampAwaitingOpenConfirmation ||
-        state_ == State::ClampAwaitingClosedConfirmation;
-
     if (estop_.isActive()) {
         stopOwnedOutputs();
         emitSimpleTerminal(false, "safety_inhibit_activated");
@@ -926,7 +842,7 @@ void DiagnosticRunner::update() {
         return;
     }
 
-    if (motors_.isMotionInhibited() && !clampObservationState) {
+    if (motors_.isMotionInhibited()) {
         stopOwnedOutputs();
         emitSimpleTerminal(false, "safety_inhibit_activated");
         clearRun();
@@ -936,7 +852,6 @@ void DiagnosticRunner::update() {
     const uint32_t now = millis();
 
     const bool guidedWaiting =
-        clampObservationState ||
         state_ == State::AndonAwaitingGreenConfirmation ||
         state_ == State::AndonAwaitingYellowConfirmation ||
         state_ == State::AndonAwaitingBlueConfirmation ||
@@ -971,8 +886,6 @@ void DiagnosticRunner::update() {
             updateSensor();
             break;
 
-        case State::ClampAwaitingOpenConfirmation:
-        case State::ClampAwaitingClosedConfirmation:
         case State::AndonAwaitingGreenConfirmation:
         case State::AndonAwaitingYellowConfirmation:
         case State::AndonAwaitingBlueConfirmation:

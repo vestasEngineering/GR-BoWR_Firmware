@@ -8,7 +8,6 @@ class Ultrasonic;
 class UltrasonicServo;
 class BatteryMonitor;
 class EStop;
-class ClampSensor;
 
 namespace BootHealth {
 
@@ -24,10 +23,6 @@ struct Report {
 
   // Motor system health (encoder-driven)
   bool motors_ok = false;
-
-  // Clamp sensor
-  bool clamp_ok = false;
-  bool clamp_state = false;
 
   // Ultrasonic
   bool ultrasonic_ok = false;

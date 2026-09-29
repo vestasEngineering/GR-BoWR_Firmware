@@ -11,7 +11,6 @@ class BatteryMonitor;
 class Ultrasonic;
 class UltrasonicServo;
 class EStop;
-class ClampSensor;
 class ContactorMonitor;
 
 class AndonManager {
@@ -31,7 +30,6 @@ public:
     UltrasonicPersistent,
     UltrasonicServoFault,
     ActuatorFault,
-    ClampUnclamped,
     Motor0Fault,
     Motor1Fault,
     Motor2Fault,
@@ -50,7 +48,6 @@ public:
                Ultrasonic& ultrasonic,
                UltrasonicServo& ut_servo,
                EStop& estop,
-               ClampSensor& clamp,
                ContactorMonitor& contactor,
                bool& hmiConnected,
                Config cfg = kDefaultCfg);
@@ -94,7 +91,6 @@ private:
   UltrasonicServo&   ut_servo_;
   Config             cfg_;
   EStop&             estop_;
-  ClampSensor&       clamp_;
   ContactorMonitor&  contactor_;
   bool&               hmi_connected_;
 

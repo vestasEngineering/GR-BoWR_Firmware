@@ -5,7 +5,7 @@
  *  Project: GR-ToWR Firmware
  *  Description: Firmware for the Glue Robot - Top of Web Rover (GR-ToWR), running on an Arduino Portenta H7. 
  *  Author: Giovanni Cordova - CREADIS
- *  Date: 03/24/2025
+ *  Date: 09/18/2026
  */
 
 #include <Arduino.h>
@@ -41,9 +41,6 @@ bool actuatorDisconnectActive = false;
 #include <AndonLight.hpp>
 AndonLight andonLight(myUART0);
 
-#include "ClampSensor.hpp"
-ClampSensor clamp(CFG.clamp);
-
 #include "ContactorMonitor.hpp"
 ContactorMonitor contactor;
 
@@ -70,13 +67,12 @@ AndonManager andonMgr(
     ultrasonic,
     ultrasonicServo,
     estop,
-    clamp,
     contactor,
     hmiConnected
 );
 
 #include "DiagnosticRunner.hpp"
-DiagnosticRunner diagnosticRunner(myUART0, motors, actuator, batteryMonitor, ultrasonic, ultrasonicServo, andonMgr, estop, clamp, jogControl, ultrasonicEnabled
+DiagnosticRunner diagnosticRunner(myUART0, motors, actuator, batteryMonitor, ultrasonic, ultrasonicServo, andonMgr, estop, jogControl, ultrasonicEnabled
 );
 #include "BootHealth.hpp"
 bool runtimeReadyPublished = false;
@@ -217,7 +213,6 @@ void setup() {
       diagnosticRunner
   );
   batteryMonitor.setup();
-  clamp.setup();
   andonLight.setup();
   andonMgr.setup();
   
@@ -308,7 +303,6 @@ void loop() {
     estop.tick();
     contactor.tick();
     encoderSession.tick(ultrasonicEnabled);
-    clamp.tick();
     batteryMonitor.stateMachine();
 
     // Check actuator DAC/ADC connection before choosing which controller

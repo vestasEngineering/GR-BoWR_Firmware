@@ -9,7 +9,6 @@
 #include "UltrasonicServo.hpp"
 #include "AndonManager.hpp"
 #include "EStop.hpp"
-#include "ClampSensor.hpp"
 #include "JogControl.hpp"
 
 class DiagnosticRunner {
@@ -26,8 +25,6 @@ public:
         ActuatorRetracting,
         ActuatorRetractedHold,
         SensorSampling,
-        ClampAwaitingOpenConfirmation,
-        ClampAwaitingClosedConfirmation,
         AndonAwaitingGreenConfirmation,
         AndonAwaitingYellowConfirmation,
         AndonAwaitingBlueConfirmation,
@@ -37,7 +34,7 @@ public:
 
     DiagnosticRunner(Stream& io, Motors& motors, ActuatorControl& actuator,
         BatteryMonitor& battery, Ultrasonic& ultrasonic, UltrasonicServo& servo,
-        AndonManager& andon, EStop& estop, ClampSensor& clamp, JogControl& jog,
+        AndonManager& andon, EStop& estop, JogControl& jog,
         bool& processEnabled);
 
     void update();
@@ -47,7 +44,6 @@ public:
     const char* activeRunId() const { return runId_; }
     bool ownsActuatorOutputs() const;
     bool confirmActuatorExtension(const JsonDocument& command);
-    bool confirmClampState(const JsonDocument& command);
     bool confirmAndonColor(const JsonDocument& command);
 
 
@@ -71,7 +67,7 @@ private:
 
     Stream& io_; Motors& motors_; ActuatorControl& actuator_;
     BatteryMonitor& battery_; Ultrasonic& ultrasonic_; UltrasonicServo& servo_;
-    AndonManager& andon_; EStop& estop_; ClampSensor& clamp_; JogControl& jog_;
+    AndonManager& andon_; EStop& estop_; JogControl& jog_;
     bool& processEnabled_;
 
     State state_ = State::Idle;
@@ -127,15 +123,9 @@ private:
     static constexpr uint8_t kAndonBlueBit = 1U << 2;
     static constexpr uint8_t kAndonRedBit = 1U << 3;
     uint32_t guidedConfirmationStartedAtMs_ = 0;
-    bool clampOpenReading_ = false;
-    bool clampClosedReading_ = false;
-    bool clampOpenRaw_ = false;
-    bool clampClosedRaw_ = false;
     uint8_t andonConfirmedMask_ = 0;
     uint8_t andonFailedMask_ = 0;
-    void emitClampProgress(const char* phase, bool expectedClamped);
     void showAndonStep(State state, AndonLight::States color, const char* colorName,
                     uint8_t step);
-    void finishClampDiagnostic();
     void finishAndonDiagnostic();
 };

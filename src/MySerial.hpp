@@ -723,22 +723,6 @@ public:
         if (!jsonPacket.containsKey("action")) {
             return;
         }
-
-        else if (action.equalsIgnoreCase("confirm_clamp_state")) {
-            StaticJsonDocument<320> response;
-            response["type"] = "ack";
-            response["id"] = "confirm_clamp_state";
-            response["run_id"] = jsonPacket["run_id"] | "";
-            response["transaction_id"] = jsonPacket["transaction_id"] | "";
-            response["module_id"] = jsonPacket["id"] | "";
-            response["ts_ms"] = millis();
-            const bool accepted = diagnosticRunner_ &&
-                diagnosticRunner_->confirmClampState(jsonPacket);
-            response["ok"] = accepted;
-            response["accepted"] = accepted;
-            if (!accepted) response["error"] = "clamp_confirmation_rejected";
-            serializeJson(response, *io); io->println();
-        }
         else if (action.equalsIgnoreCase("confirm_andon_color")) {
             StaticJsonDocument<320> response;
             response["type"] = "ack";
@@ -974,9 +958,6 @@ public:
 
                 response["voltage"] =
                     appliedVoltage;
-
-                response["clamped"] =
-                    appliedVoltage != requestedVoltage;
             }
 
             serializeJson(response, *io);
