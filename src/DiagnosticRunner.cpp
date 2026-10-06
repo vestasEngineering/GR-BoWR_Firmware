@@ -4,11 +4,11 @@
 
 static int32_t safeAbs32(int32_t v){ return v==INT32_MIN ? INT32_MAX : abs(v); }
 
-DiagnosticRunner::DiagnosticRunner(Stream& io, Motors& motors, ActuatorControl& actuator,
- BatteryMonitor& battery, Ultrasonic& ultrasonic, UltrasonicServo& servo,
+DiagnosticRunner::DiagnosticRunner(Stream& io, MotorCP& motors, ActuatorControl& actuator,
+ BatteryMonitor& battery, Ultrasonic& ultrasonic,
  AndonManager& andon, EStop& estop, JogControl& jog, bool& processEnabled)
  : io_(io), motors_(motors), actuator_(actuator), battery_(battery), ultrasonic_(ultrasonic),
- servo_(servo), andon_(andon), estop_(estop), jog_(jog), processEnabled_(processEnabled) {}
+ andon_(andon), estop_(estop), jog_(jog), processEnabled_(processEnabled) {}
 
 bool DiagnosticRunner::copyIdentity(const JsonDocument& command)
 {
@@ -141,7 +141,7 @@ bool DiagnosticRunner::startMotor(const JsonDocument& command)
 {
     const int axis = command["index"] | -1;
 
-    if (axis < 0 || axis > 3) {
+    if (axis < 0 || axis >= MotorCP::MOTORS) {
         emitRejected("invalid_motor_axis");
         clearRun();
         return false;
@@ -242,15 +242,6 @@ bool DiagnosticRunner::sampleMotorFeedback(
     latestEncoderCount_ = encoderCount;
     latestSpeedQpps_ = speedQpps;
 
-    uint32_t controllerFlags = 0;
-    if (motors_.readControllerErrorFlags(
-            axisOrChannel_,
-            controllerFlags
-        )) {
-        controllerFlags_ |= controllerFlags;
-        controllerFlagsValid_ = true;
-    }
-
     return true;
 }
 
@@ -341,7 +332,7 @@ void DiagnosticRunner::updateMotor(uint32_t now)
     }
 }
 
-const char* DiagnosticRunner::evaluateMotor(bool& pass,const char*& action) const{pass=false;if(!latestFeedbackValid_||feedbackFailures_>feedbackSamples_/2){action="Check RoboClaw communication and encoder.";return "motor_feedback_invalid";}int32_t f=forwardCount_-initialCount_,r=finalCount_-forwardCount_,e=finalCount_-initialCount_;if(safeAbs32(f)<kMotorMinimumMovementCounts){action="Check motor, encoder, and load.";return "no_forward_movement";}if(safeAbs32(r)<kMotorMinimumMovementCounts){action="Check reverse operation and load.";return "no_reverse_movement";}if((f>0)==(r>0)){action="Check motor and encoder directions.";return "motor_direction_invalid";}if(safeAbs32(e)>kMotorReturnToleranceCounts){action="Check slip, backlash, or encoder mounting.";return "return_position_out_of_tolerance";}pass=true;action="No service action required.";return "motor_test_passed";}
+const char* DiagnosticRunner::evaluateMotor(bool& pass,const char*& action) const{pass=false;if(!latestFeedbackValid_||feedbackFailures_>feedbackSamples_/2){action="Check ClearPath HLFB wiring and motor power.";return "motor_feedback_invalid";}int32_t f=forwardCount_-initialCount_,r=finalCount_-forwardCount_,e=finalCount_-initialCount_;if(safeAbs32(f)<kMotorMinimumMovementCounts){action="Check motor, encoder, and load.";return "no_forward_movement";}if(safeAbs32(r)<kMotorMinimumMovementCounts){action="Check reverse operation and load.";return "no_reverse_movement";}if((f>0)==(r>0)){action="Check motor and encoder directions.";return "motor_direction_invalid";}if(safeAbs32(e)>kMotorReturnToleranceCounts){action="Check slip, backlash, or encoder mounting.";return "return_position_out_of_tolerance";}pass=true;action="No service action required.";return "motor_test_passed";}
 void DiagnosticRunner::addControllerInformation(JsonObject m) const{m["controller_error_flags"]=controllerFlags_;m["controller_error_valid"]=controllerFlagsValid_;}
 void DiagnosticRunner::finishMotorDiagnostic(const char* forced){motors_.BRAKE_STOP();sampleMotorFeedback(millis(),true);if(latestFeedbackValid_)finalCount_=latestEncoderCount_;bool pass=false;const char* action="Inspect motor feedback.";const char* reason=forced?forced:evaluateMotor(pass,action);StaticJsonDocument<768>d;JsonObject m=d.to<JsonObject>();m["axis"]=axisOrChannel_;m["initial_count"]=initialCount_;m["forward_count"]=forwardCount_;m["final_count"]=finalCount_;m["recommended_action"]=action;addControllerInformation(m);emitTerminal(pass,reason,m);clearRun();}
 

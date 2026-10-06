@@ -111,9 +111,6 @@
 #ifndef FEATURE_ULTRASONIC
   #define FEATURE_ULTRASONIC 1
 #endif
-#ifndef FEATURE_ULTRASONIC_SERVO
-  #define FEATURE_ULTRASONIC_SERVO 1
-#endif
 #ifndef FEATURE_ACTUATOR
   #define FEATURE_ACTUATOR 1
 #endif
@@ -212,7 +209,6 @@ inline void printHumanReadable(Stream& out = Serial) {
   out.print  (F("Features:    "));
   out.print(F("ANDON_LIGHT=")); out.print(FEATURE_ANDON);
   out.print(F(", ULTRASONIC=")); out.print(FEATURE_ULTRASONIC);
-  out.print(F(", ULTRASONIC_SERVO=")); out.print(FEATURE_ULTRASONIC_SERVO);
   out.print(F(", ACTUATOR=")); out.print(FEATURE_ACTUATOR);
   out.print(F(", BATTERY_OLED=")); out.print(FEATURE_BATTERY_OLED);
   out.print(F(", MOTORS=")); out.println(FEATURE_MOTORS);
@@ -277,10 +273,6 @@ inline void printJson(Stream& out = Serial) {
 
   out.print(F("\"ultrasonic\":"));
   out.print(FEATURE_ULTRASONIC);
-  out.print(F(","));
-
-  out.print(F("\"ultrasonic_servo\":"));
-  out.print(FEATURE_ULTRASONIC_SERVO);
   out.print(F(","));
 
   out.print(F("\"actuator\":"));
