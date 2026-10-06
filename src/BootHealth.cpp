@@ -1,9 +1,8 @@
 #include "BootHealth.hpp"
 #include "AndonLight.hpp"
-#include "Motors.hpp"
+#include "MotorCP.hpp"
 #include "Actuator.hpp"
 #include "Ultrasonic.hpp"
-#include "UltrasonicServo.hpp"
 #include "BatteryMonitor.hpp"
 #include <Version.hpp>
 #include <ArduinoJson.h>
@@ -11,27 +10,19 @@
 
 namespace BootHealth {
 
-bool probeEncoders(Motors& motors, uint32_t timeoutMs, uint8_t& goodCount) {
-    uint32_t start = millis();
+bool probeEncoders(MotorCP& motors, uint32_t timeoutMs, uint8_t& goodCount) {
+    (void)timeoutMs;
+    motors.pollEncoders();
+
     goodCount = 0;
-
-    while (millis() - start < timeoutMs) {
-
-        motors.pollEncoders();
-
-        goodCount = 0;
-        for (int i = 0; i < 4; i++) {
-            // If the robot is booting, all encoders should read ~0
-            // and they shouldn't be NaN or giant corrupted numbers.
-            if (abs(motors.encCounts[i]) < 5 * Motors::ENCODER_CPR) {
-                goodCount++;
-            }
+    const uint8_t mask = motors.encoderReadValidMask();
+    for (uint8_t i = 0; i < MotorCP::MOTORS; i++) {
+        if ((mask & (1u << i)) && abs(motors.encCounts[i]) < 1000000) {
+            goodCount++;
         }
-
-        if (goodCount >= 4) return true;
     }
 
-    return false;
+    return goodCount >= MotorCP::MOTORS;
 }
 
 
@@ -50,13 +41,6 @@ static void checkUltrasonic(const Ultrasonic& u, BootHealth::Report& r) {
         (adc > 0 && adc < 1023);
 
     r.ultrasonic_ok = plausible;
-}
-
-
-static void checkUltrasonicServo(const UltrasonicServo& /*us*/, BootHealth::Report& r) {
-    // Your UltrasonicServo class does not expose servo.attached()
-    // Assume servo attached if setup succeeded.
-    r.ultrasonic_servo_ok = true;
 }
 
 
@@ -86,10 +70,9 @@ static void checkBattery(BatteryMonitor* b, BootHealth::Report& r) {
 }
 
 BootHealth::Report run(AndonLight& light,
-                       Motors& motors,
+                       MotorCP& motors,
                        ActuatorControl& actuator,
                        Ultrasonic& ultrasonic,
-                       UltrasonicServo& us_servo,
                        BatteryMonitor* battery,
                        EStop& estop,
                        uint32_t timeoutMs)
@@ -105,13 +88,12 @@ BootHealth::Report run(AndonLight& light,
 
     r.encoders_ok = encOk;
     r.encoders_present_mask = 
-        (goodCount >= 4 ? 0x0F : (uint8_t)((1 << goodCount) - 1));
+        (goodCount >= MotorCP::MOTORS ? 0x03 : (uint8_t)((1 << goodCount) - 1));
 
 
 
     r.motors_ok = (r.encoders_ok);
     checkUltrasonic(ultrasonic, r);
-    checkUltrasonicServo(us_servo, r);
     checkActuator(actuator, r);
     checkBattery(battery, r);
     r.estop_active = estop.isActive();
@@ -120,7 +102,6 @@ BootHealth::Report run(AndonLight& light,
         r.andon_ok &&
         r.encoders_ok &&              // formerly “CAN OK”, now encoder comm OK
         r.ultrasonic_ok &&
-        r.ultrasonic_servo_ok &&
         r.actuator_ok &&
         r.motors_ok &&
         r.battery_ok;
@@ -156,7 +137,6 @@ void sendReport(const BootHealth::Report& r, Stream& out) {
         us["distance_mm"] = r.ultrasonic_distance;
     }
 
-    checks["ultrasonic_servo"]["ok"] = r.ultrasonic_servo_ok;
     checks["actuator"]["ok"]          = r.actuator_ok;
     checks["estop"]["active"]         = r.estop_active;
 

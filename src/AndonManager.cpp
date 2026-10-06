@@ -1,12 +1,11 @@
 #include "AndonManager.hpp"
 #include "AndonLight.hpp"
 #include "MySerial.hpp"
-#include "Motors.hpp"
+#include "MotorCP.hpp"
 #include "Actuator.hpp"
 #include "JogControl.hpp"
 #include "BatteryMonitor.hpp"
 #include "Ultrasonic.hpp"
-#include "UltrasonicServo.hpp"
 #include "Config.hpp"
 #include "EStop.hpp"
 #include "ContactorMonitor.hpp"
@@ -20,12 +19,9 @@ const char* AndonManager::faultToKey(FaultCode f) {
     case FaultCode::ContactorPowerLost:    return "motor_contactor_power_lost";
     case FaultCode::BatteryCritical:       return "battery_critical";
     case FaultCode::UltrasonicPersistent:  return "ultrasonic_bad";
-    case FaultCode::UltrasonicServoFault:  return "ultrasonic_servo_fault";
     case FaultCode::ActuatorFault:         return "actuator_fault";
     case FaultCode::Motor0Fault:           return "motor0_fault";
     case FaultCode::Motor1Fault:           return "motor1_fault";
-    case FaultCode::Motor2Fault:           return "motor2_fault";
-    case FaultCode::Motor3Fault:           return "motor3_fault";
     default:                               return "unknown_fault";
   }
 }
@@ -36,30 +32,26 @@ const char* AndonManager::faultToModuleId(FaultCode f) {
     case FaultCode::ContactorPowerLost:     return "estop";
     case FaultCode::BatteryCritical:        return "battery";
     case FaultCode::UltrasonicPersistent:   return "ultrasonic";
-    case FaultCode::UltrasonicServoFault:   return "ultrasonic_servo";
     case FaultCode::ActuatorFault:          return "actuator_1";
     case FaultCode::Motor0Fault:            return "motor_1";
     case FaultCode::Motor1Fault:            return "motor_2";
-    case FaultCode::Motor2Fault:            return "motor_3";
-    case FaultCode::Motor3Fault:            return "motor_4";
     default:                                return "unknown";
   }
 }
 
 AndonManager::AndonManager(AndonLight& light,
                            MySerial& link,
-                           Motors& motors,
+                           MotorCP& motors,
                            ActuatorControl& actuator,
                            JogControl& jog,
                            BatteryMonitor& battery,
                            Ultrasonic& ultrasonic,
-                           UltrasonicServo& ut_servo,
                            EStop& estop,
                            ContactorMonitor& contactor,
                            bool& hmiConnected,
                            Config cfg)
 : light_(light), link_(link), motors_(motors), actuator_(actuator),
-  jog_(jog), battery_(battery), ultrasonic_(ultrasonic), ut_servo_(ut_servo),
+  jog_(jog), battery_(battery), ultrasonic_(ultrasonic),
   cfg_(cfg), estop_(estop), contactor_(contactor),
   hmi_connected_(hmiConnected) {}
 

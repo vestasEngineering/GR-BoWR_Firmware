@@ -2,7 +2,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include "ContactorMonitor.hpp"
-#include "Motors.hpp"
+#include "MotorCP.hpp"
 
 class EncoderSession {
 public:
@@ -15,7 +15,7 @@ public:
     RESTORE_FAILED
   };
 
-  EncoderSession(ContactorMonitor& contactor, Motors& motors, Stream& io)
+  EncoderSession(ContactorMonitor& contactor, MotorCP& motors, Stream& io)
       : contactor_(contactor), motors_(motors), io_(io) {}
 
   void setup() {
@@ -119,7 +119,7 @@ public:
 
 private:
   ContactorMonitor& contactor_;
-  Motors& motors_;
+  MotorCP& motors_;
   Stream& io_;
   State state_ = State::STARTUP_RECOVERY;
   uint32_t sessionId_ = 1;

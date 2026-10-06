@@ -3,8 +3,7 @@
 
 #include <ArduinoJson.h>
 #include <Arduino.h>
-#include <Wire.h>
-#include <seesaw_neopixel.h>
+#include <Adafruit_NeoPixel.h>
 #include <math.h>
 #include "Config.hpp"
 
@@ -32,26 +31,24 @@ public:
     bool booting = true;
     bool hardwareOk = false;
 
-    // Construct with placeholders; setup() applies configured length/type.
-    seesaw_NeoPixel strip = seesaw_NeoPixel(
-        1,
-        15,
-        NEO_GRB + NEO_KHZ800,
-        &Wire1
-    );
+    // Placeholders: CFG may not be constructed yet when this object is.
+    // setup() applies the configured pin, length and brightness.
+    Adafruit_NeoPixel strip = Adafruit_NeoPixel(1, 4, NEO_GRB + NEO_KHZ800);
 
     void setup() {
         io->println(
             F("{\"type\":\"status\",\"module\":\"andon\",\"msg\":\"initializing\"}")
         );
 
-        Wire1.begin();
-        configureWireTimeout_();
+        strip.setPin(CFG.andon.pin);
+        strip.updateLength(CFG.andon.num_leds);
+        strip.begin();
+        strip.setBrightness(CFG.andon.brightness);
+        strip.clear();
+        strip.show();
 
-        if (!initializeHardware_()) {
-            enterHeadlessMode_("seesaw_not_found");
-            return;
-        }
+        hardwareOk = true;
+        curR_ = curG_ = curB_ = 0;
 
         // The boot animation intentionally owns the LEDs until it completes.
         // State changes received during boot are remembered and shown afterward.
@@ -66,11 +63,6 @@ public:
 
     void loop() {
         const uint32_t now = millis();
-
-        if (!hardwareOk) {
-            tryReconnectIfNeeded_(now);
-            return;
-        }
 
         // This is intentional: while booting, the boot animation is the only
         // content drawn. Requested states are retained and applied afterward.
@@ -139,7 +131,7 @@ public:
             return;
         }
 
-        if (!fade || CFG.andon.fade_ms == 0) {
+        if (!fade || motionActive_ || CFG.andon.fade_ms == 0) {
             fading_ = false;
             curR_ = r;
             curG_ = g;
@@ -169,9 +161,13 @@ public:
         fading_ = false;
     }
 
+    // strip.show() masks interrupts for ~1.5 ms, which would stall the motor
+    // step generator. While the motors are stepping, color changes snap
+    // instead of fading so each state change costs a single show().
+    void setMotionActive(bool active) { motionActive_ = active; }
+
 private:
-    static constexpr uint32_t WIRE_TIMEOUT_US_ = 5000;
-    static constexpr uint32_t RECONNECT_INTERVAL_MS_ = 1000;
+    bool motionActive_ = false;
     static constexpr uint32_t BOOT_STEP_INTERVAL_MS_ = 30;
 
     bool stateInitialized_ = false;
@@ -197,102 +193,7 @@ private:
     uint16_t bootStep_ = 0;
     bool bootFrameDirty_ = false;
 
-    uint32_t nextReconnectMs_ = 0;
-
-    void configureWireTimeout_() {
-#if defined(WIRE_HAS_TIMEOUT)
-        Wire1.setWireTimeout(WIRE_TIMEOUT_US_, true);
-        Wire1.clearWireTimeoutFlag();
-#endif
-    }
-
-    void clearWireTimeout_() {
-#if defined(WIRE_HAS_TIMEOUT)
-        Wire1.clearWireTimeoutFlag();
-#endif
-    }
-
-    bool consumeWireTimeout_() {
-#if defined(WIRE_HAS_TIMEOUT)
-        if (Wire1.getWireTimeoutFlag()) {
-            Wire1.clearWireTimeoutFlag();
-            return true;
-        }
-#endif
-        return false;
-    }
-
-    bool initializeHardware_() {
-        clearWireTimeout_();
-
-        if (!strip.begin(CFG.andon.neo_addr) || consumeWireTimeout_()) {
-            return false;
-        }
-
-        strip.updateType(NEO_GRB + NEO_KHZ800);
-        strip.updateLength(CFG.andon.num_leds);
-
-        // Establish a known black framebuffer and push it once.
-        for (uint16_t i = 0; i < CFG.andon.num_leds; ++i) {
-            strip.setPixelColor(i, 0);
-        }
-
-        clearWireTimeout_();
-        strip.show();
-        if (consumeWireTimeout_()) {
-            return false;
-        }
-
-        hardwareOk = true;
-        curR_ = curG_ = curB_ = 0;
-        return true;
-    }
-
-    void enterHeadlessMode_(const char* reason) {
-        const bool wasOperational = hardwareOk;
-
-        hardwareOk = false;
-        booting = false;
-        fading_ = false;
-        blinkStatus = false;
-        nextReconnectMs_ = millis() + RECONNECT_INTERVAL_MS_;
-
-        StaticJsonDocument<160> doc;
-        doc["type"] = "error";
-        doc["module"] = "andon";
-        doc["error"] = reason;
-        doc["mode"] = "headless";
-        doc["runtime"] = wasOperational;
-        serializeJson(doc, *io);
-        io->println();
-    }
-
-    void tryReconnectIfNeeded_(uint32_t now) {
-        if (static_cast<int32_t>(now - nextReconnectMs_) < 0) {
-            return;
-        }
-
-        nextReconnectMs_ = now + RECONNECT_INTERVAL_MS_;
-
-        // Reset/reconfigure only Wire1. BatteryMonitor and the OLED remain
-        // logically independent and will continue on their own schedule.
-        Wire1.begin();
-        configureWireTimeout_();
-
-        if (!initializeHardware_()) {
-            return;
-        }
-
-        io->println(
-            F("{\"type\":\"status\",\"module\":\"andon\",\"status\":\"reconnected\"}")
-        );
-
-        // A reconnect is treated like a fresh Andon start. The animation owns
-        // the LEDs, then the latest requested state is applied at completion.
-        startBootAnimation();
-    }
-
-    bool isBlinkState_(States value) const {
+        bool isBlinkState_(States value) const {
         return value >= BLINK_GREEN && value <= BLINK_RED;
     }
 
@@ -476,7 +377,7 @@ private:
         lastFrameMs_ = now;
         bootFrameDirty_ = false;
         drawBootFrame_();
-        showOrFault_("seesaw_boot_show_failed");
+        strip.show();
     }
 
     void drawBootFrame_() {
@@ -510,31 +411,11 @@ private:
     }
 
     void writeColor_(uint8_t r, uint8_t g, uint8_t b) {
-        if (!hardwareOk) {
-            return;
-        }
-
         for (uint16_t i = 0; i < CFG.andon.num_leds; ++i) {
             strip.setPixelColor(i, strip.Color(r, g, b));
         }
 
-        showOrFault_("seesaw_show_failed");
-    }
-
-    bool showOrFault_(const char* reason) {
-        if (!hardwareOk) {
-            return false;
-        }
-
-        clearWireTimeout_();
         strip.show();
-
-        if (consumeWireTimeout_()) {
-            enterHeadlessMode_(reason);
-            return false;
-        }
-
-        return true;
     }
 
     uint32_t wheel_(uint8_t wheelPosition) {

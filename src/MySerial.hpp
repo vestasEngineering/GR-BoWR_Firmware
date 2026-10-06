@@ -6,12 +6,11 @@
 #include <vector>
 #include "Config.hpp"
 #include "AndonLight.hpp"
-#include "Motors.hpp"
+#include "MotorCP.hpp"
 #include "AndonManager.hpp"
 #include "Ultrasonic.hpp"
 #include "Actuator.hpp"
 #include "BatteryMonitor.hpp"
-#include "UltrasonicServo.hpp"
 #include "JogControl.hpp"
 #include "Version.hpp"
 #include "EncoderSession.hpp"
@@ -100,9 +99,8 @@ public:
     // Wiring to other subsystems
     AndonManager* andonMgr = nullptr;
     AndonLight* andonLight;
-    Motors*     motors;
+    MotorCP*    motors;
     ActuatorControl* actuator;
-    UltrasonicServo* ultrasonicServo_ = nullptr;    
     Stream* io = nullptr;
     JogControl* jogControl = nullptr;
     EncoderSession* encoderSession_ = nullptr;
@@ -110,7 +108,7 @@ public:
 
 
     
-    MySerial(Stream& ioRef, ActuatorControl& actuatorRef, AndonLight& lightRef, Motors& motorsRef)
+    MySerial(Stream& ioRef, ActuatorControl& actuatorRef, AndonLight& lightRef, MotorCP& motorsRef)
     : io(&ioRef)
     , andonMgr(nullptr)
     , andonLight(&lightRef)
@@ -125,10 +123,6 @@ public:
         ultrasonicEnabled_ = &enabledFlag;
     }
     
-    void attachUltrasonicServo(UltrasonicServo& s) {
-        ultrasonicServo_ = &s;
-    }
-
     void attachJogControl(JogControl& jog) {
             jogControl = &jog;
         }
@@ -327,9 +321,9 @@ public:
             return;
         }
 
-        float command[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float command[MotorCP::MOTORS] = {0.0f, 0.0f};
         command[directionTest_.axis] = 0.025f;
-        motors->setSpeeds(command[0], command[1], command[2], command[3]);
+        motors->setSpeeds(command[0], command[1]);
     }
 
     enum class LinkState { CONNECTED, DISCONNECTED };
@@ -680,19 +674,41 @@ public:
         io->println();
     }
 
+    // {"action":"steer","angle":<deg>,"valid":1,"seq":<n>}
+    void handleSteer_() {
+        const bool valid =
+            !jsonPacket.containsKey("valid") || jsonPacket["valid"].as<int>() != 0;
+        const float angle = jsonPacket["angle"] | NAN;
+
+        if (!valid || !isfinite(angle)) {
+            motors->steering.invalidate();
+            return;
+        }
+
+        const uint32_t seq = jsonPacket["seq"] | 0;
+        motors->steering.submitAngle(angle, seq, millis());
+    }
+
     void updateParameters() {
         // Update motor speeds if present: speed0..speed3
-        float requestedSpeeds[4] = {
+        String action = jsonPacket["action"];
+
+        // Steering angle from the compute module: handled first and kept
+        // minimal so the angle reaches MotorCP with the lowest latency.
+        if (action.equalsIgnoreCase("steer")) {
+            handleSteer_();
+            return;
+        }
+
+        float requestedSpeeds[MotorCP::MOTORS] = {
             motors->speeds[0],
-            motors->speeds[1],
-            motors->speeds[2],
-            motors->speeds[3]
+            motors->speeds[1]
         };
 
-        String action = jsonPacket["action"];
         bool hasSpeedUpdate = false;
 
-        for (int i = 0; i < 4; ++i) {
+        // Only the two ClearPath axes exist; speed2/speed3 are ignored.
+        for (int i = 0; i < MotorCP::MOTORS; ++i) {
             String speedKey = "speed" + String(i);
 
             if (jsonPacket.containsKey(speedKey)) {
@@ -710,9 +726,7 @@ public:
         if (hasSpeedUpdate) {
             motors->setSpeeds(
                 requestedSpeeds[0],
-                requestedSpeeds[1],
-                requestedSpeeds[2],
-                requestedSpeeds[3]
+                requestedSpeeds[1]
             );
         }
 
@@ -1573,36 +1587,30 @@ public:
             }
         }
         else if (action.equalsIgnoreCase("set_motor_tuning")) {
-            int32_t maxSpeed = jsonPacket["max_speed"] | 2500;
-            int32_t accel    = jsonPacket["accel"] | 4250;
-            int32_t decel    = jsonPacket["decel"] | 8500;
+            const float maxSpeedMs =
+                jsonPacket["max_speed_ms"] | motors->maxSpeedMs;
+            const float accelMps2 =
+                jsonPacket["accel_mps2"] | motors->accelMps2;
+            const float decelMps2 =
+                jsonPacket["decel_mps2"] | motors->decelMps2;
+            const float brakeMps2 =
+                jsonPacket["brake_decel_mps2"] | motors->brakeDecelMps2;
 
-            motors->maxCommandQpps = maxSpeed;
-            motors->accelQppsPerSec = (accel > decel) ? accel : decel;
-            motors->brakeDecelQppsPerSec = decel;
-
-            // These are sent in physical units for the PID/process slew limiter.
-            float accelMps2 = jsonPacket["accel_mps2"] | CFG.ultrasonic.motion_accel_mps2;
-            float decelMps2 = jsonPacket["decel_mps2"] | CFG.ultrasonic.motion_decel_mps2;
-
-            if (accelMps2 < 0.0f) accelMps2 = CFG.ultrasonic.motion_accel_mps2;
-            if (decelMps2 < 0.0f) decelMps2 = CFG.ultrasonic.motion_decel_mps2;
-
-            //if (ultrasonic_) {
-            //    ultrasonic_->maxAccelMps2 = accelMps2;
-            //    ultrasonic_->maxDecelMps2 = decelMps2;
-            //}
+            motors->setRampLimits(
+                isfinite(maxSpeedMs) ? maxSpeedMs : -1.0f,
+                isfinite(accelMps2) ? accelMps2 : -1.0f,
+                isfinite(decelMps2) ? decelMps2 : -1.0f,
+                isfinite(brakeMps2) ? brakeMps2 : -1.0f
+            );
 
             StaticJsonDocument<192> response;
             response["type"] = "ack";
             response["ok"] = true;
             response["info"] = "motor_tuning_set";
-            response["max_speed_qpps"] = maxSpeed;
-            response["accel_qpps_s"] = accel;
-            response["decel_qpps_s"] = decel;
-            response["roboclaw_accel_qpps_s"] = motors->accelQppsPerSec;
-            response["accel_mps2"] = accelMps2;
-            response["decel_mps2"] = decelMps2;
+            response["max_speed_ms"] = motors->maxSpeedMs;
+            response["accel_mps2"] = motors->accelMps2;
+            response["decel_mps2"] = motors->decelMps2;
+            response["brake_decel_mps2"] = motors->brakeDecelMps2;
             serializeJson(response, *io); 
             io->println();
         }
@@ -1942,10 +1950,6 @@ public:
             }
 
             motors->BRAKE_STOP();
-
-            if (ultrasonicServo_) {
-                ultrasonicServo_->deactivate();
-            }
 
             emitProcessStatus(
                 false,
@@ -2560,7 +2564,7 @@ public:
         } else if (strlen(transactionId) >= sizeof(directionTest_.transactionId)) {
             response["ok"] = false;
             response["error"] = "transaction_id_too_long";
-        } else if (axis < 0 || axis >= 4) {
+        } else if (axis < 0 || axis >= MotorCP::MOTORS) {
             response["ok"] = false;
             response["error"] = "invalid_axis";
         } else if (directionTest_.active) {
@@ -2920,46 +2924,6 @@ void runTestBattery(const char* id) {
     // Consider PASS if within expected min/max rails
     bool pass = (actualVoltage >= MIN_BATTERY_VOLTAGE && actualVoltage <= MAX_BATTERY_VOLTAGE);
     emitTestResult(id, "sensor", pass, meas.as<JsonObject>(), pass ? "voltage in range" : "out of range");
-}
-
-void runTestUltrasonicServo(const char* id) {
-    StaticJsonDocument<128> meas;
-
-    if (!ultrasonicServo_ || !ultrasonic_) {
-        emitTestResult(id, "servo", false, meas.as<JsonObject>(), "servo_not_attached");
-        return;
-    }
-
-    // 1) Activate servo
-    ultrasonicServo_->activate();
-    delay(1000);
-
-    // 2) Let ultrasonic update for ~1 second
-    const unsigned long t_end = millis() + 1000;
-    while (millis() < t_end) {
-        ultrasonic_->stateMachine();
-        delay(10);
-    }
-
-    // 2.5) Wait for the ultrasonic’s last measurement to finish
-    delay(150);
-
-    // 3) Read measurement
-    float d = ultrasonic_->distance[0] > 0.0f
-                ? ultrasonic_->distance[0]
-                : ultrasonic_->measuredDistance;
-
-    meas["distance_mm"] = d;
-
-    // 4) Evaluate against fault criteria (< 60mm)
-    bool pass = d >= 60.0f;
-
-    // 5) Return servo to inactive
-    ultrasonicServo_->deactivate();
-    delay(300);
-
-    emitTestResult(id, "servo", pass, meas.as<JsonObject>(), 
-        pass ? "distance_ok" : "distance_too_close");
 }
 
     void stopActuatorPreview(const char* reason) {

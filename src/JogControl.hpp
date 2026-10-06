@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 #include <string.h>
-#include "Motors.hpp"
+#include "MotorCP.hpp"
 #include "Config.hpp"
 
 class MySerial;
@@ -26,7 +26,7 @@ public:
         MOTION_INHIBITED,
     };
 
-    explicit JogControl(Motors& motorsRef, MySerial& serialRef)
+    explicit JogControl(MotorCP& motorsRef, MySerial& serialRef)
         : motors(motorsRef), mySerial(serialRef) {
         remoteSessionId[0] = '\0';
     }
@@ -140,7 +140,7 @@ public:
 private:
     enum class Source { NONE, PHYSICAL, REMOTE };
 
-    Motors& motors;
+    MotorCP& motors;
     MySerial& mySerial;
     Source activeSource = Source::NONE;
 
@@ -195,8 +195,8 @@ private:
         remoteDirection = 0;
         remoteSpeedMs = 0.0f;
         remoteExpireMs = 0;
-        motors.setSpeeds(0.0f, 0.0f, 0.0f, 0.0f);
-        motors.STOP();
+        motors.setSpeeds(0.0f, 0.0f);
+        motors.BRAKE_STOP();
     }
 
     void updateRemoteJog() {
@@ -299,7 +299,7 @@ private:
         if (
             motors.isMotionInhibited() ||
             fabsf(robotVelocity) <
-                Motors::ZERO_SPEED_THRESHOLD_MS
+                MotorCP::ZERO_SPEED_THRESHOLD_MS
         ) {
             stopAllJog();
             return;
@@ -308,13 +308,11 @@ private:
         /*
         * Straight-line robot-frame command.
         *
-        * Every axis receives the same logical direction.
-        * Motors::motorDirection[] performs the individual
+        * Both tracks receive the same logical direction.
+        * MotorCP::motorDirection[] performs the individual
         * installation-polarity correction.
         */
         motors.setSpeeds(
-            robotVelocity,
-            robotVelocity,
             robotVelocity,
             robotVelocity
         );

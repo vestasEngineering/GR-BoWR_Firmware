@@ -15,23 +15,18 @@
 #include "Config.hpp"
 
 UART myUART0(PA_0, PI_9, NC, NC);   // TX, RX, RTS, CTS
-UART roboclaw_uart_a(PA_9, PA_10, NC, NC);
-UART roboclaw_uart_b(PJ_8, PJ_9, NC, NC);
 
 #include "EStop.hpp"
 EStop estop;
 
-#include <Motors.hpp>
-Motors motors(&roboclaw_uart_a, &roboclaw_uart_b);
+#include <MotorCP.hpp>
+MotorCP motors;
 
 #include <Ultrasonic.hpp>
 Ultrasonic ultrasonic;
 bool ultrasonicEnabled = false;
 bool hmiConnected = false;
   
-
-#include <UltrasonicServo.hpp>
-UltrasonicServo ultrasonicServo;
 
 #include <Actuator.hpp>
 ActuatorControl actuator(myUART0);
@@ -65,14 +60,13 @@ AndonManager andonMgr(
     jogControl,
     batteryMonitor,
     ultrasonic,
-    ultrasonicServo,
     estop,
     contactor,
     hmiConnected
 );
 
 #include "DiagnosticRunner.hpp"
-DiagnosticRunner diagnosticRunner(myUART0, motors, actuator, batteryMonitor, ultrasonic, ultrasonicServo, andonMgr, estop, jogControl, ultrasonicEnabled
+DiagnosticRunner diagnosticRunner(myUART0, motors, actuator, batteryMonitor, ultrasonic, andonMgr, estop, jogControl, ultrasonicEnabled
 );
 #include "BootHealth.hpp"
 bool runtimeReadyPublished = false;
@@ -81,38 +75,28 @@ bool runtimeReadyPublished = false;
 
 #include "Portenta_H7_TimerInterrupt.h"
 volatile int interruptCounter = 0;
-void m7timer() { 
-  // every 1/10,000 second - 10,000hz - 0.0001 second
+void m7timer() {
+  // 100 kHz (10 us). The step generator must run on every tick.
+  MotorCP::stepIsr();
+
   interruptCounter++;
 
-  //if(mySerial.delay) mySerial.delay--;
-
-  // every 10/10,000 second - 1,000hz - 0.001 second
-  if ((interruptCounter % 10) == 0) { 
+  // 1,000 Hz - 1 ms
+  if ((interruptCounter % 100) == 0) {
       if(mySerial.thisDelay) mySerial.thisDelay--;
       if(mySerial.timeout) mySerial.timeout--;
       if (mySerial.receiveDelay) mySerial.receiveDelay--;
-
   }
 
-  // every 100/10,000 second - 100hz - 0.01 second
-  if ((interruptCounter % 100) == 0) { 
+  // 100 Hz - 10 ms
+  if ((interruptCounter % 1000) == 0) {
     if(ultrasonic.delay) ultrasonic.delay--;
-    if (ultrasonic.servoSettleDelay) ultrasonic.servoSettleDelay--;
-
-    //if(encoder.thisDelay) encoder.thisDelay--;
   }
 
-  // every 1,000/10,000 second - 10hz - 0.1 second
-  if ((interruptCounter % 1000) == 0) { 
-    //if (redLedDelay) redLedDelay--;
-  }
-
-  // every 10,000/10,000 second - 1hz
-  if ((interruptCounter % 10000) == 0) {
+  // 1 Hz - wrap the counter
+  if ((interruptCounter % 100000) == 0) {
     interruptCounter = 0;
   }
-
 }
 Portenta_H7_Timer M7Timer(TIM7);
 
@@ -195,13 +179,10 @@ void setup() {
   contactor.setup();
   encoderSession.setup();
   ultrasonic.setup();
-  ultrasonicServo.attachUltrasonic(ultrasonic);
   estop.setup();
   mySerial.attachAndonManager(andonMgr);
   mySerial.attachUltrasonic(ultrasonic, ultrasonicEnabled);
-  mySerial.attachUltrasonicServo(ultrasonicServo);
   ultrasonic.attachMotors(motors);
-  ultrasonicServo.setup();
 
   actuator.setup ();
   actuatorWasConnected = !actuator.hasPCBFault();
@@ -227,7 +208,6 @@ void setup() {
       motors,
       actuator,
       ultrasonic,
-      ultrasonicServo,
       &batteryMonitor,
       estop,
       /*can_timeout_ms=*/500
@@ -236,7 +216,7 @@ void setup() {
 
   //If boot health fails, latch Andon to BLINK_RED (until manual override)
   //if (!rep.ok) andonMgr.setOverride(AndonLight::BLINK_RED);
-  M7Timer.attachInterruptInterval(100, m7timer);
+  M7Timer.attachInterruptInterval(10, m7timer);
 }
 
 void updateActuatorConnectionMode()
@@ -260,9 +240,6 @@ void updateActuatorConnectionMode()
         if (ultrasonicWasActive) {
             motors.BRAKE_STOP();
         }
-
-        ultrasonicServo.deactivate();
-        ultrasonic.servoSettleDelay = 0;
 
         mySerial.emitProcessStatus(
             false,
@@ -289,6 +266,40 @@ void updateActuatorConnectionMode()
     actuatorWasConnected = actuatorConnected;
 }
 
+// The autonomous process steers from the compute module's laser angle. If
+// that angle stops arriving, stop the process rather than drive blind.
+void enforceSteeringFreshness(uint32_t now)
+{
+    static bool wasRunning = false;
+    static uint32_t startedMs = 0;
+
+    const bool running = ultrasonicEnabled;
+    if (running && !wasRunning) {
+        startedMs = now;
+    }
+    wasRunning = running;
+
+    if (!running
+        || !CFG.steering.enabled
+        || !CFG.steering.stop_process_when_stale
+        || jogControl.isActive()
+        || diagnosticRunner.active()) {
+        return;
+    }
+
+    if (static_cast<uint32_t>(now - startedMs) < CFG.steering.startup_grace_ms) {
+        return;
+    }
+
+    if (!motors.steering.isStale(now)) {
+        return;
+    }
+
+    ultrasonicEnabled = false;
+    ultrasonic.stopAndBrake();
+    mySerial.emitProcessStatus(false, "steering_angle_stale");
+}
+
 void loop() {
 
     const uint32_t now = millis();
@@ -299,6 +310,7 @@ void loop() {
         return;
     }
 
+    andonLight.setMotionActive(motors.isStepping());
     andonLight.loop();
     estop.tick();
     contactor.tick();
@@ -331,15 +343,13 @@ void loop() {
     const bool actuatorConnected = !actuator.hasPCBFault();
 
     if (diagnosticRunner.active()) {
-        ultrasonic.servoSettleDelay = 0;
+        // The diagnostic runner owns the motors.
     }
     else if (
         ultrasonicEnabled &&
         actuatorConnected &&
         !actuatorDisconnectActive
     ) {
-        ultrasonicServo.activate();
-
         jogControl.update();
 
         if (!jogControl.isActive()) {
@@ -347,12 +357,12 @@ void loop() {
         }
     }
     else {
-        ultrasonicServo.deactivate();
-        ultrasonic.servoSettleDelay = 0;
         jogControl.update();
     }
 
     andonMgr.enforceMotionSafety();
+
+    enforceSteeringFreshness(now);
 
     motors.update();
     andonMgr.tick();

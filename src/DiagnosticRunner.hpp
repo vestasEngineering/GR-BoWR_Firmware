@@ -2,11 +2,10 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include "Motors.hpp"
+#include "MotorCP.hpp"
 #include "Actuator.hpp"
 #include "BatteryMonitor.hpp"
 #include "Ultrasonic.hpp"
-#include "UltrasonicServo.hpp"
 #include "AndonManager.hpp"
 #include "EStop.hpp"
 #include "JogControl.hpp"
@@ -32,8 +31,8 @@ public:
         Aborting
     };
 
-    DiagnosticRunner(Stream& io, Motors& motors, ActuatorControl& actuator,
-        BatteryMonitor& battery, Ultrasonic& ultrasonic, UltrasonicServo& servo,
+    DiagnosticRunner(Stream& io, MotorCP& motors, ActuatorControl& actuator,
+        BatteryMonitor& battery, Ultrasonic& ultrasonic,
         AndonManager& andon, EStop& estop, JogControl& jog,
         bool& processEnabled);
 
@@ -53,9 +52,9 @@ private:
     static constexpr uint32_t kMotorRunMs = 2000;
     static constexpr uint32_t kMotorSettleTimeoutMs = 1200;
     static constexpr uint32_t kMotorSamplePeriodMs = 75;
-    static constexpr int32_t kMotorMinimumMovementCounts = 40;
-    static constexpr int32_t kMotorReturnToleranceCounts = 150;
-    static constexpr int32_t kMotorStoppedQpps = 25;
+    static constexpr int32_t kMotorMinimumMovementCounts = 5;
+    static constexpr int32_t kMotorReturnToleranceCounts = 3;
+    static constexpr int32_t kMotorStoppedQpps = 12;
 
     static constexpr float kActuatorMaxCommandV = 3.0f;
     static constexpr uint32_t kActuatorPhaseTimeoutMs = 15000;
@@ -65,8 +64,8 @@ private:
     static constexpr float kCalibrationPlateauDeltaV = 0.035f;
     static constexpr float kMinimumFeedbackSpanV = 0.50f;
 
-    Stream& io_; Motors& motors_; ActuatorControl& actuator_;
-    BatteryMonitor& battery_; Ultrasonic& ultrasonic_; UltrasonicServo& servo_;
+    Stream& io_; MotorCP& motors_; ActuatorControl& actuator_;
+    BatteryMonitor& battery_; Ultrasonic& ultrasonic_;
     AndonManager& andon_; EStop& estop_; JogControl& jog_;
     bool& processEnabled_;
 

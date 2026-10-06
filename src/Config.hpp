@@ -24,8 +24,9 @@ struct ActuatorCfg {
 };
 
 struct AndonCfg {
-    uint8_t  neo_addr            = 0x61;
+    int      pin                 = D4;     // WS2812 data line (driven directly)
     uint16_t num_leds            = 41;
+    uint8_t  brightness          = 255;    // global 0-255 scale
     uint16_t frame_dt_ms         = 16;     // ~60 Hz
     uint16_t blink_interval_ms   = 500;
     uint16_t boot_duration_ms    = 5000;
@@ -73,19 +74,78 @@ struct EStopCfg {
 };
 
 struct MotorsCfg {
-    uint32_t can_bitrate        = 250000;
-    uint16_t apos_hz            = 50;
-    bool     apos_query_all     = false;
+    // --- Pins (ClearPath step & direction, one set per motor) ---
+    // Axis 0 = "motor 1" connector, axis 1 = "motor 2" connector.
+    int pin_hlfb[2]             = { D8,  D14 };
+    int pin_step[2]             = { D5,  D9  };
+    int pin_dir[2]              = { D6,  D21  };
+    int pin_enable[2]           = { D7,  D3  };   // D11/D12 are I2C (Wire) - do not use
 
-    float wheel_diameter_m      = 0.048f;
-    int   encoder_cpr           = 4096;
-    float encoder_to_mm         = 310.0f / 280.0f;
+    bool enable_active_high     = true;
+    uint32_t enable_settle_ms   = 500;      // ENABLE asserted -> first STEP pulse
 
-    float erefs_k               = 18.7187185f;
+    // Which axis drives the left / right track (when facing forward).
+    bool axis0_is_left          = true;
 
-    uint32_t apos_ids[4]        = { 0x16002005, 0x16004005, 0x16006005, 0x16008005 };
-    uint32_t erefs_ids[4]       = { 0x048020A8, 0x048040A8, 0x048060A8, 0x048080A8 };
-    uint32_t reset_apos_ids[4]  = { 0x00802002, 0x00804002, 0x00806002, 0x00808002 };
+    // +1 / -1: sign applied to a forward (positive) speed to get the DIR pin
+    // level. Tracks are mirrored, so one axis is normally inverted.
+    int8_t motor_direction[2]   = { 1, 1 };
+    // +1 / -1: sign applied to HLFB pulse counts so forward travel is positive.
+    int8_t encoder_direction[2] = { 1, 1 };
+
+    // --- Mechanics ---
+    float wheel_diameter_m      = 0.185f;   // main drive wheel
+    float gearbox_ratio         = 10.0f;    // motor revs per wheel rev
+    uint32_t steps_per_motor_rev = 3200;    // ClearPath step resolution setting
+
+    // --- HLFB used as encoder (16 pulses per motor rev, no direction) ---
+    uint16_t hlfb_ppr           = 16;
+    // Displacement per HLFB pulse. Default = pi * D / (gear * PPR) = 3.632 mm.
+    // Tune this against a measured distance to calibrate odometry.
+    float hlfb_mm_per_pulse     = 3.14159265f * 185.0f / (10.0f * 16.0f);
+    // Minimum time between accepted HLFB edges (glitch filter), microseconds.
+    uint32_t hlfb_min_edge_us   = 200;
+
+    // --- Step generation ---
+    uint16_t step_pulse_ticks   = 1;        // STEP high time in 10 us ISR ticks
+    float max_speed_ms          = 0.30f;    // hard clamp on any wheel speed
+    float accel_mps2            = 1.0f;     // slew limit for speed increases
+    float decel_mps2            = 2.0f;     // slew limit for speed decreases
+    float brake_decel_mps2      = 4.0f;     // BRAKE_STOP ramp
+
+    // Encoders considered "stopped" below this wheel speed
+    float zero_speed_ms         = 0.0002f;
+};
+
+struct SteeringCfg {
+    bool     enabled            = true;
+
+    // Laser-line angle (deg) is regulated to this value; 0 = drive parallel.
+    float    target_angle_deg   = 0.0f;
+
+    // +1 : positive angle means the robot must turn toward the right
+    //      (left track faster). -1 inverts it.
+    int8_t   sign               = 1;
+
+    // Angle -> yaw rate (rad/s per rad) and integral term.
+    float    kp                 = 1.5f;
+    float    ki                 = 0.0f;
+    float    integral_limit_rad_s = 0.20f;
+    float    deadband_deg       = 0.1f;
+
+    // Distance between the two track centerlines.
+    float    track_width_m      = 0.30f;
+
+    // Largest speed difference between the tracks.
+    float    max_diff_ms        = 0.04f;
+
+    // Below this mean speed steering is not applied (and the integral resets).
+    float    min_active_speed_ms = 0.005f;
+
+    // Angle freshness.
+    uint16_t stale_ms           = 250;      // age after which an angle is ignored
+    uint16_t startup_grace_ms   = 3000;     // wait for first angle after process start
+    bool     stop_process_when_stale = true;
 };
 
 struct JogCfg {
@@ -137,12 +197,6 @@ struct UltrasonicCfg {
     uint16_t telemetry_period_ms = 50; // 20 Hz
 };
 
-struct UltrasonicServoCfg {
-    int pwm_pin                 = D3;
-    int active_angle_deg        = 00;
-    int inactive_angle_deg      = 170;
-};
-
 struct SerialCfg {
     uint16_t rx_keepalive_ms    = 2000;
     uint16_t rx_led_flash_ms    = 50;
@@ -167,7 +221,7 @@ struct RobotConfig {
     MotorsCfg          motors;
     JogCfg             jog;
     UltrasonicCfg      ultrasonic;
-    UltrasonicServoCfg ut_servo;
+    SteeringCfg        steering;
     SerialCfg          serial;
     ContactorCfg       contactor;
 };

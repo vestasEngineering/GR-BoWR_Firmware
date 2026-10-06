@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include "Motors.hpp"
+#include "MotorCP.hpp"
 #include "Config.hpp"
 #include <math.h>
 
@@ -15,7 +15,6 @@ public:
     float processSpeed = 0.0f;               // exposed target speed m/s
     float currentSpeed = 0.0f;               // mirrors processSpeed compat
     float distance[3] = {0, 0, 0};            // filtered distance history
-    volatile uint16_t servoSettleDelay = 0;  // ultrasonic servo delay in 10 ms ticks
 
     // -----------------------------
     // Internal state
@@ -23,7 +22,7 @@ public:
     float measuredDistance = 0.0f;
     uint16_t badReadStreak = 0;
 
-    Motors* motors = nullptr;
+    MotorCP* motors = nullptr;
 
     // -----------------------------
     // Tracking behavior
@@ -45,12 +44,8 @@ public:
 
     Ultrasonic() {}
 
-    void attachMotors(Motors& m) {
+    void attachMotors(MotorCP& m) {
         motors = &m;
-    }
-
-    void notifyServoMoved(uint16_t settleTicks) {
-        servoSettleDelay = settleTicks;
     }
 
     void setup() {
@@ -115,8 +110,6 @@ public:
             JsonArray qppsArr = doc.createNestedArray("qpps");
             qppsArr.add(motors->qpps[0]);
             qppsArr.add(motors->qpps[1]);
-            qppsArr.add(motors->qpps[2]);
-            qppsArr.add(motors->qpps[3]);
         }
 
         serializeJson(doc, myUART0);
@@ -146,8 +139,6 @@ public:
     }
 
     void stateMachine() {
-
-        if (servoSettleDelay > 0) return;
 
         if (delay) return;
         delay = 10;
@@ -193,10 +184,8 @@ public:
 
                 currentSpeed = processSpeed;
 
-                if (motors && processSpeed > Motors::ZERO_SPEED_THRESHOLD_MS) {
+                if (motors && processSpeed > MotorCP::ZERO_SPEED_THRESHOLD_MS) {
                     motors->setSpeeds(
-                        processSpeed,
-                        processSpeed,
                         processSpeed,
                         processSpeed
                     );
@@ -407,12 +396,10 @@ public:
             if (glueState == WAIT_FOR_GLUE) {
 
                 // WAIT state means full stop.
-                if (fabsf(processSpeed) < Motors::ZERO_SPEED_THRESHOLD_MS) {
+                if (fabsf(processSpeed) < MotorCP::ZERO_SPEED_THRESHOLD_MS) {
                     stopAndBrake();
                 } else {
                     motors->setSpeeds(
-                        processSpeed,
-                        processSpeed,
                         processSpeed,
                         processSpeed
                     );
@@ -422,8 +409,6 @@ public:
 
                 // TRACKING:
                 motors->setSpeeds(
-                    processSpeed,
-                    processSpeed,
                     processSpeed,
                     processSpeed
                 );

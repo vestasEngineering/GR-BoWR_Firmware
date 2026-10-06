@@ -4,12 +4,11 @@
 #include "AndonLight.hpp"
 
 class MySerial;
-class Motors;
+class MotorCP;
 class ActuatorControl;
 class JogControl;
 class BatteryMonitor;
 class Ultrasonic;
-class UltrasonicServo;
 class EStop;
 class ContactorMonitor;
 
@@ -28,12 +27,9 @@ public:
     ContactorPowerLost,
     BatteryCritical,
     UltrasonicPersistent,
-    UltrasonicServoFault,
     ActuatorFault,
     Motor0Fault,
-    Motor1Fault,
-    Motor2Fault,
-    Motor3Fault
+    Motor1Fault
   };
 
   static const char* faultToKey(FaultCode f);
@@ -41,12 +37,11 @@ public:
 
   AndonManager(AndonLight& light,
                MySerial& link,
-               Motors& motors,
+               MotorCP& motors,
                ActuatorControl& actuator,
                JogControl& jog,
                BatteryMonitor& battery,
                Ultrasonic& ultrasonic,
-               UltrasonicServo& ut_servo,
                EStop& estop,
                ContactorMonitor& contactor,
                bool& hmiConnected,
@@ -83,12 +78,11 @@ private:
 
   AndonLight&        light_;
   MySerial&          link_;
-  Motors&            motors_;
+  MotorCP&           motors_;
   ActuatorControl&   actuator_;
   JogControl&        jog_;
   BatteryMonitor&    battery_;
   Ultrasonic&        ultrasonic_;
-  UltrasonicServo&   ut_servo_;
   Config             cfg_;
   EStop&             estop_;
   ContactorMonitor&  contactor_;

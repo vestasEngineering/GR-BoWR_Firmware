@@ -2,10 +2,9 @@
 #include <Arduino.h>
 
 class AndonLight;
-class Motors;
+class MotorCP;
 class ActuatorControl;
 class Ultrasonic;
-class UltrasonicServo;
 class BatteryMonitor;
 class EStop;
 
@@ -30,9 +29,6 @@ struct Report {
   float ultrasonic_voltage = NAN;
   float ultrasonic_distance = NAN;
 
-  // Ultrasonic servo
-  bool ultrasonic_servo_ok = false;
-
   // Actuator board/motion checks
   bool actuator_ok = false;
 
@@ -46,14 +42,13 @@ struct Report {
 };
 
 
-bool probeEncoders(Motors& motors, uint32_t timeoutMs, uint8_t& goodCount);
+bool probeEncoders(MotorCP& motors, uint32_t timeoutMs, uint8_t& goodCount);
 
 
 Report run(AndonLight& light,
-           Motors& motors,
+           MotorCP& motors,
            ActuatorControl& actuator,
            Ultrasonic& ultrasonic,
-           UltrasonicServo& us_servo,
            BatteryMonitor* battery /* optional */,
            EStop& estop,
            uint32_t timeout_ms = 500);
