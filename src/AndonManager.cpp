@@ -12,6 +12,8 @@
 
 constexpr AndonManager::Config AndonManager::kDefaultCfg;
 extern bool ultrasonicEnabled;
+extern bool laserBaseModeActive;
+extern bool laserBaseSteering;
 
 const char* AndonManager::faultToKey(FaultCode f) {
   switch (f) {
@@ -70,6 +72,11 @@ void AndonManager::setup() {
 
 void AndonManager::setOverride(AndonLight::States s) { override_state_ = s; has_override_ = true; }
 void AndonManager::clearOverride() { has_override_ = false; }
+void AndonManager::flash(AndonLight::States s, uint32_t durationMs) {
+  flash_state_ = s;
+  flash_until_ms_ = millis() + durationMs;
+  has_flash_ = true;
+}
 AndonLight::States AndonManager::currentState() const { return current_; }
 
 void AndonManager::tick() {
@@ -77,8 +84,12 @@ void AndonManager::tick() {
   if (now - last_tick_ms_ < CFG.andonMgr.tick_period_ms) return;
   last_tick_ms_ = now;
 
+  const bool flashing = has_flash_ && static_cast<int32_t>(flash_until_ms_ - now) > 0;
+
   AndonLight::States raw;
-  if (has_override_) {
+  if (flashing && !isEStop() && !hasFault()) {
+    raw = flash_state_;
+  } else if (has_override_) {
     if (isEStop() || hasFault() || isCommsLost()) raw = compute(now);
     else raw = override_state_;
   } else {
@@ -108,6 +119,7 @@ AndonLight::States AndonManager::compute(uint32_t /*now*/) {
   if (isJogging())              return AndonLight::BLINK_BLUE;
   if (isActuatorDisconnected()) return AndonLight::BLUE;
   if (isCommsLost())            return AndonLight::YELLOW;
+  if (laserBaseModeActive)      return laserBaseSteering ? AndonLight::BLINK_PURPLE : AndonLight::PURPLE;
   if (isHmiDisconnected())      return AndonLight::YELLOW;
   if (isBlockedOrStarved())     return AndonLight::BLINK_YELLOW;
   if (isBatteryLow())           return AndonLight::BLINK_YELLOW;

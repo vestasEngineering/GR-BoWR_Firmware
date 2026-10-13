@@ -123,6 +123,10 @@ struct SteeringCfg {
     // Laser-line angle (deg) is regulated to this value; 0 = drive parallel.
     float    target_angle_deg   = 0.0f;
 
+    // Mean laser position offset (mm, from sensor center) adds this many degrees
+    // to the angle error, so the beam is pulled to the sensor centers.
+    float    lateral_gain_deg_per_mm = 0.1f;
+
     // +1 : positive angle means the robot must turn toward the right
     //      (left track faster). -1 inverts it.
     int8_t   sign               = 1;
@@ -153,6 +157,17 @@ struct JogCfg {
     int  pin_backward           = D10;
     float jog_speed_max_ms      = 0.05f;
     uint16_t jog_duration_ms    = 1000;
+    // A button must stay down this long before it starts a jog, so the first
+    // button of a two-button hold does not move the robot.
+    uint16_t start_confirm_ms   = 150;
+};
+
+struct LaserBaseCfg {
+    uint16_t entry_hold_ms      = 5000;    // both jog buttons held this long to enter
+    uint16_t entry_reject_flash_ms = 2000; // andon purple sweep when an entry is refused
+    uint16_t exit_debounce_ms   = 300;     // jog button state must hold this long to count while active
+    float    steer_acquire_angle_deg = 5.0f;  // steering starts once |angle| is within this
+    uint16_t steer_acquire_ms   = 300;     // ...and has stayed within it this long
 };
 
 struct UltrasonicCfg {
@@ -222,6 +237,7 @@ struct RobotConfig {
     JogCfg             jog;
     UltrasonicCfg      ultrasonic;
     SteeringCfg        steering;
+    LaserBaseCfg       laserBase;
     SerialCfg          serial;
     ContactorCfg       contactor;
 };

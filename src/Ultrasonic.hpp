@@ -75,6 +75,15 @@ public:
         }
     }
 
+    void reset() {
+        processSpeed = 0.0f;
+        currentSpeed = 0.0f;
+        glueState = WAIT_FOR_GLUE;
+        goodGlueCounter = 0;
+        badReadStreak = 0;
+        distanceFilterInitialized = false;
+    }
+
     void emitTelemetry(
         float filteredDistance,
         float targetSpeed,

@@ -24,6 +24,7 @@ public:
         STALE_SEQUENCE,
         PHYSICAL_JOG_ACTIVE,
         MOTION_INHIBITED,
+        LOCKED,
     };
 
     explicit JogControl(MotorCP& motorsRef, MySerial& serialRef)
@@ -46,6 +47,13 @@ public:
     bool isRemoteActive() const { return activeSource == Source::REMOTE; }
     bool isPhysicalActive() const { return activeSource == Source::PHYSICAL; }
 
+    // While locked, no jog starts. Unlocking ignores the buttons until they are
+    // all released, so the press that ends a lock does not start a jog.
+    void setLocked(bool locked) {
+        if (!locked && locked_) awaitingRelease_ = true;
+        locked_ = locked;
+    }
+
     const char* currentRemoteSessionId() const { return remoteSessionId; }
     uint32_t lastAcceptedRemoteSequence() const { return lastRemoteSeq; }
 
@@ -57,6 +65,7 @@ public:
             case RemoteJogResult::STALE_SEQUENCE: return "stale_sequence";
             case RemoteJogResult::PHYSICAL_JOG_ACTIVE: return "physical_jog_active";
             case RemoteJogResult::MOTION_INHIBITED: return "motion_inhibited";
+            case RemoteJogResult::LOCKED: return "jog_locked";
             default: return "jog_rejected";
         }
     }
@@ -68,6 +77,9 @@ public:
         unsigned long requestedLeaseMs,
         uint32_t seq
     ) {
+        if (locked_) {
+            return RemoteJogResult::LOCKED;
+        }
         if (direction != 1 && direction != -1) {
             return RemoteJogResult::INVALID_DIRECTION;
         }
@@ -145,6 +157,10 @@ private:
     Source activeSource = Source::NONE;
 
     bool physicalJogActive = false;
+    bool locked_ = false;
+    bool awaitingRelease_ = false;
+    bool pressPending_ = false;
+    unsigned long pressPendingMs_ = 0;
     int physicalDirection = 0;
     unsigned long physicalStartMs = 0;
 
@@ -209,21 +225,33 @@ private:
     void updatePhysicalJog() {
         const bool forwardPressed = !digitalRead(CFG.jog.pin_forward);
         const bool backwardPressed = !digitalRead(CFG.jog.pin_backward);
+        const bool anyPressed = forwardPressed || backwardPressed;
 
         if (activeSource == Source::REMOTE) return;
 
-        if (forwardPressed && backwardPressed) {
+        if (!anyPressed) {
+            awaitingRelease_ = false;
+            pressPending_ = false;
             if (activeSource == Source::PHYSICAL) stopAllJog();
             return;
         }
 
-        if (activeSource == Source::PHYSICAL &&
-            !forwardPressed && !backwardPressed) {
-            stopAllJog();
+        // A two-button hold must not leave a single-button jog behind when one button is released first.
+        if (forwardPressed && backwardPressed) awaitingRelease_ = true;
+
+        if (locked_ || awaitingRelease_) {
+            if (activeSource == Source::PHYSICAL) stopAllJog();
+            pressPending_ = false;
             return;
         }
 
-        if ((forwardPressed || backwardPressed) && !physicalJogActive) {
+        if (!physicalJogActive) {
+            if (!pressPending_) {
+                pressPending_ = true;
+                pressPendingMs_ = millis();
+            }
+            if (millis() - pressPendingMs_ < CFG.jog.start_confirm_ms) return;
+
             physicalJogActive = true;
             physicalStartMs = millis();
 
@@ -232,8 +260,7 @@ private:
             activeSource = Source::PHYSICAL;
         }
 
-        if (activeSource == Source::PHYSICAL && physicalJogActive &&
-            millis() - physicalStartMs >= CFG.jog.jog_duration_ms) {
+        if (millis() - physicalStartMs >= CFG.jog.jog_duration_ms) {
             stopAllJog();
         }
     }

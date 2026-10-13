@@ -9,8 +9,9 @@
 // speed difference between the two tracks (left - right, m/s).
 class SteeringControl {
 public:
-    void submitAngle(float angleDeg, uint32_t seq, uint32_t nowMs) {
+    void submitAngle(float angleDeg, float offsetMm, uint32_t seq, uint32_t nowMs) {
         angleDeg_ = angleDeg;
+        offsetMm_ = offsetMm;
         seq_ = seq;
         lastAngleMs_ = nowMs;
         everReceived_ = true;
@@ -25,6 +26,9 @@ public:
     }
 
     bool hasAngle() const { return everReceived_; }
+    bool holdsLastAngle() const { return holdLastAngle_; }
+    void setHoldLastAngle(bool hold) { holdLastAngle_ = hold; }
+    void setArmed(bool armed) { armed_ = armed; }
     float lastAngleDeg() const { return angleDeg_; }
     uint32_t lastSeq() const { return seq_; }
     uint32_t lastAngleAgeMs(uint32_t nowMs) const {
@@ -50,14 +54,16 @@ public:
         lastComputeMs_ = nowMs;
 
         if (!c.enabled
+            || !armed_
             || meanSpeedMs < c.min_active_speed_ms
-            || isStale(nowMs)) {
+            || !everReceived_
+            || (!holdLastAngle_ && isStale(nowMs))) {
             integral_ = 0.0f;
             lastDiffMs_ = 0.0f;
             return 0.0f;
         }
 
-        float errDeg = angleDeg_ - c.target_angle_deg;
+        float errDeg = angleDeg_ + c.lateral_gain_deg_per_mm * offsetMm_ - c.target_angle_deg;
         if (fabsf(errDeg) < c.deadband_deg) errDeg = 0.0f;
         const float errRad = errDeg * (PI / 180.0f);
 
@@ -79,11 +85,14 @@ public:
 
 private:
     float angleDeg_ = 0.0f;
+    float offsetMm_ = 0.0f;
     uint32_t seq_ = 0;
     uint32_t lastAngleMs_ = 0;
     uint32_t lastComputeMs_ = 0;
     bool everReceived_ = false;
     bool fresh_ = false;
+    bool holdLastAngle_ = false;
+    bool armed_ = true;
     float integral_ = 0.0f;
     float lastDiffMs_ = 0.0f;
 };

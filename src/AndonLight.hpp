@@ -18,7 +18,10 @@ public:
         BLINK_GREEN,
         BLINK_YELLOW,
         BLINK_BLUE,
-        BLINK_RED
+        BLINK_RED,
+        BLINK_PURPLE,
+        PURPLE,
+        SWEEP_PURPLE
     };
 
     explicit AndonLight(Stream& ioRef) : io(&ioRef) {}
@@ -76,6 +79,11 @@ public:
             return;
         }
 
+        if (isSweepState_(state)) {
+            serviceSweep_(now);
+            return;
+        }
+
         if (fading_) {
             serviceFade_(now);
         }
@@ -126,8 +134,8 @@ public:
             return;
         }
 
-        if (isBlinkState_(state)) {
-            // Blink timing owns output while a blinking state is active.
+        if (isBlinkState_(state) || isSweepState_(state)) {
+            // Animation timing owns output while a blinking or sweeping state is active.
             return;
         }
 
@@ -169,11 +177,13 @@ public:
 private:
     bool motionActive_ = false;
     static constexpr uint32_t BOOT_STEP_INTERVAL_MS_ = 30;
+    static constexpr uint32_t SWEEP_STEP_MS_ = 40;
 
     bool stateInitialized_ = false;
 
     uint32_t lastFrameMs_ = 0;
     uint32_t lastBlinkMs_ = 0;
+    uint32_t sweepStartMs_ = 0;
 
     bool fading_ = false;
     uint32_t fadeStartMs_ = 0;
@@ -194,7 +204,53 @@ private:
     bool bootFrameDirty_ = false;
 
         bool isBlinkState_(States value) const {
-        return value >= BLINK_GREEN && value <= BLINK_RED;
+        return value >= BLINK_GREEN && value <= BLINK_PURPLE;
+    }
+
+    bool isSweepState_(States value) const {
+        return value == SWEEP_PURPLE;
+    }
+
+    void startSweep_() {
+        sweepStartMs_ = millis();
+        lastFrameMs_ = 0;
+        blinkStatus = false;
+        fading_ = false;
+    }
+
+    void serviceSweep_(uint32_t now) {
+        if (
+            static_cast<uint32_t>(now - lastFrameMs_) <
+            CFG.andon.frame_dt_ms
+        ) {
+            return;
+        }
+
+        lastFrameMs_ = now;
+        drawSweepFrame_(now);
+        strip.show();
+    }
+
+    void drawSweepFrame_(uint32_t now) {
+        const int ledCount = static_cast<int>(CFG.andon.num_leds);
+        if (ledCount <= 0) {
+            return;
+        }
+
+        const int head = static_cast<int>(
+            ((now - sweepStartMs_) / SWEEP_STEP_MS_) % ledCount
+        );
+
+        for (int i = 0; i < ledCount; ++i) {
+            const int distanceBehindHead = (head - i + ledCount) % ledCount;
+            const float brightness = powf(0.6f, distanceBehindHead);
+
+            strip.setPixelColor(i, strip.Color(
+                static_cast<uint8_t>(160.0f * brightness),
+                0,
+                static_cast<uint8_t>(255.0f * brightness)
+            ));
+        }
     }
 
     void getStateColor_(States value, uint8_t& r, uint8_t& g, uint8_t& b) const {
@@ -224,6 +280,13 @@ private:
                 r = 255;
                 break;
 
+            case PURPLE:
+            case BLINK_PURPLE:
+            case SWEEP_PURPLE:
+                r = 160;
+                b = 255;
+                break;
+
             case OFF:
             default:
                 break;
@@ -237,6 +300,11 @@ private:
 
         if (isBlinkState_(state)) {
             applyBlinkOnImmediately_();
+            return;
+        }
+
+        if (isSweepState_(state)) {
+            startSweep_();
             return;
         }
 

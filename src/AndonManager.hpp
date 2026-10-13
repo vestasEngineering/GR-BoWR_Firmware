@@ -50,6 +50,7 @@ public:
   void setup();
   void setOverride(AndonLight::States s);
   void clearOverride();
+  void flash(AndonLight::States s, uint32_t durationMs);
   void tick();
   void enforceMotionSafety();
   bool motionStopRequired() const;
@@ -93,6 +94,9 @@ private:
   uint32_t           startup_grace_until_{0};
   bool               has_override_{false};
   AndonLight::States override_state_{};
+  bool               has_flash_{false};
+  AndonLight::States flash_state_{};
+  uint32_t           flash_until_ms_{0};
   AndonLight::States current_{};
   AndonLight::States last_raw_{};
 };

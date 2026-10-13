@@ -19,6 +19,8 @@
 #include <limits.h>
 #include <string.h>
 
+extern bool laserBaseModeActive;
+
 
 class AndonManager;
 class Ultrasonic;
@@ -175,6 +177,9 @@ public:
             case AndonLight::BLINK_YELLOW: return "BLINK_YELLOW";
             case AndonLight::BLINK_BLUE:   return "BLINK_BLUE";
             case AndonLight::BLINK_RED:    return "BLINK_RED";
+            case AndonLight::PURPLE:       return "PURPLE";
+            case AndonLight::BLINK_PURPLE: return "BLINK_PURPLE";
+            case AndonLight::SWEEP_PURPLE: return "SWEEP_PURPLE";
             default:                       return "UNKNOWN";
         }
     }
@@ -604,6 +609,8 @@ public:
         else if (s.equalsIgnoreCase("BLINK_YELLOW"))  out = AndonLight::BLINK_YELLOW;
         else if (s.equalsIgnoreCase("BLINK_BLUE"))    out = AndonLight::BLINK_BLUE;
         else if (s.equalsIgnoreCase("BLINK_RED"))     out = AndonLight::BLINK_RED;
+        else if (s.equalsIgnoreCase("PURPLE"))        out = AndonLight::PURPLE;
+        else if (s.equalsIgnoreCase("BLINK_PURPLE"))  out = AndonLight::BLINK_PURPLE;
         else return false;
         return true;
     }
@@ -674,19 +681,23 @@ public:
         io->println();
     }
 
-    // {"action":"steer","angle":<deg>,"valid":1,"seq":<n>}
+    // {"action":"steer","angle":<deg>,"offset_mm":<mm>,"valid":1,"seq":<n>}
     void handleSteer_() {
         const bool valid =
             !jsonPacket.containsKey("valid") || jsonPacket["valid"].as<int>() != 0;
         const float angle = jsonPacket["angle"] | NAN;
 
         if (!valid || !isfinite(angle)) {
-            motors->steering.invalidate();
+            // Laser base mode keeps the last valid angle across dropouts.
+            if (!motors->steering.holdsLastAngle()) {
+                motors->steering.invalidate();
+            }
             return;
         }
 
+        const float offsetMm = jsonPacket["offset_mm"] | 0.0f;
         const uint32_t seq = jsonPacket["seq"] | 0;
-        motors->steering.submitAngle(angle, seq, millis());
+        motors->steering.submitAngle(angle, offsetMm, seq, millis());
     }
 
     void updateParameters() {
@@ -723,7 +734,7 @@ public:
             }
         }
 
-        if (hasSpeedUpdate) {
+        if (hasSpeedUpdate && !laserBaseModeActive) {
             motors->setSpeeds(
                 requestedSpeeds[0],
                 requestedSpeeds[1]
@@ -1730,6 +1741,18 @@ public:
                     value;
             }
 
+            if (laserBaseModeActive) {
+                response["ok"] = false;
+                response["error"] =
+                    "laser_base_mode_active";
+                serializeJson(
+                    response,
+                    *io
+                );
+                io->println();
+                return;
+            }
+
             if (
                 ultrasonicEnabled_
                 && *ultrasonicEnabled_
@@ -1814,6 +1837,23 @@ public:
                 emitProcessStatus(
                     false,
                     "missing_transaction_id"
+                );
+
+                return;
+            }
+
+            if (laserBaseModeActive) {
+                emitProcessStartAck(
+                    transactionId,
+                    false,
+                    "blocked",
+                    nullptr,
+                    "laser_base_mode_active"
+                );
+
+                emitProcessStatus(
+                    false,
+                    "laser_base_mode_active"
                 );
 
                 return;
@@ -2175,6 +2215,10 @@ public:
                 response["ok"] = false;
                 response["error"] =
                     "direction_test_active";
+            } else if (laserBaseModeActive) {
+                response["ok"] = false;
+                response["error"] =
+                    "laser_base_mode_active";
             } else if (processActive) {
                 response["ok"] = false;
                 response["error"] =
@@ -2570,6 +2614,9 @@ public:
         } else if (directionTest_.active) {
             response["ok"] = false;
             response["error"] = "direction_test_active";
+        } else if (laserBaseModeActive) {
+            response["ok"] = false;
+            response["error"] = "laser_base_mode_active";
         } else if (processActive) {
             response["ok"] = false;
             response["error"] = "process_active";

@@ -31,6 +31,8 @@ bool DiagnosticRunner::copyIdentity(const JsonDocument& command)
     return true;
 }
 
+extern bool laserBaseModeActive;
+
 bool DiagnosticRunner::preflight(
     bool motionDiagnostic,
     const char*& reason
@@ -48,6 +50,11 @@ bool DiagnosticRunner::preflight(
 
     if (jog_.isActive()) {
         reason = "jog_must_be_stopped";
+        return false;
+    }
+
+    if (motionDiagnostic && laserBaseModeActive) {
+        reason = "laser_base_mode_active";
         return false;
     }
 
